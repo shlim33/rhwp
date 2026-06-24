@@ -3,6 +3,7 @@ import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { CanvasView } from '@/view/canvas-view';
 import { InputHandler } from '@/engine/input-handler';
+import { InsertTextCommand, SplitParagraphCommand } from '@/engine/command';
 import { Toolbar } from '@/ui/toolbar';
 import { MenuBar } from '@/ui/menu-bar';
 import { loadWebFonts } from '@/core/font-loader';
@@ -635,7 +636,30 @@ async function createNewDocument(): Promise<void> {
   } catch (error) {
     msg.textContent = `새 문서 생성 실패: ${error}`;
     console.error('[main] 새 문서 생성 실패:', error);
+    throw error;
   }
+}
+
+function insertPlainText(text: string): { insertedChars: number; pageCount: number } {
+  if (!inputHandler) throw new Error('input handler is not ready');
+  if (!text) return { insertedChars: 0, pageCount: wasm.pageCount };
+
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]) {
+      inputHandler.executeOperation({
+        kind: 'command',
+        command: new InsertTextCommand(inputHandler.getCursorPosition(), lines[i]),
+      });
+    }
+    if (i < lines.length - 1) {
+      inputHandler.executeOperation({
+        kind: 'command',
+        command: new SplitParagraphCommand(inputHandler.getCursorPosition()),
+      });
+    }
+  }
+  return { insertedChars: text.length, pageCount: wasm.pageCount };
 }
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
@@ -799,6 +823,24 @@ window.addEventListener('message', async (e) => {
         const bytes = new Uint8Array(params.data);
         await loadBytes(bytes, params.fileName || 'document.hwp', null);
         reply({ pageCount: wasm.pageCount });
+        break;
+      }
+      case 'createNewDocument':
+        await initPromise;
+        if (!await canReplaceCurrentDocument(Boolean(params?.skipUnsavedGuard))) {
+          reply(undefined, '문서 생성이 취소되었습니다.');
+          break;
+        }
+        await createNewDocument();
+        reply({ pageCount: wasm.pageCount });
+        break;
+      case 'insertText': {
+        await initPromise;
+        if (wasm.pageCount <= 0) {
+          await createNewDocument();
+        }
+        const result = insertPlainText(String(params?.text ?? ''));
+        reply(result);
         break;
       }
       case 'pageCount':

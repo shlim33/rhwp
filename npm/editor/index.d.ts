@@ -26,9 +26,27 @@ export interface HwpVerifyResult {
   recovered: boolean;
 }
 
+export interface CreateDocumentOptions {
+  /** 편집 중 문서 교체 확인창을 건너뜁니다. 기본 true */
+  skipUnsavedGuard?: boolean;
+}
+
+export interface CreateDocumentResult {
+  pageCount: number;
+}
+
+export interface InsertTextResult {
+  insertedChars: number;
+  pageCount: number;
+}
+
 export declare class RhwpEditor {
   /** HWP 파일을 로드합니다 */
   loadFile(data: ArrayBuffer | Uint8Array, fileName?: string): Promise<LoadResult>;
+  /** 새 빈 문서를 생성합니다 */
+  createNewDocument(options?: CreateDocumentOptions): Promise<CreateDocumentResult>;
+  /** 현재 커서 위치에 일반 텍스트를 삽입합니다 */
+  insertText(text: string): Promise<InsertTextResult>;
   /** 현재 문서의 페이지 수를 반환합니다 */
   pageCount(): Promise<number>;
   /** 특정 페이지를 SVG 문자열로 렌더링합니다 */

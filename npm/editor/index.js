@@ -158,6 +158,25 @@ class RhwpEditor {
   }
 
   /**
+   * 새 빈 문서를 생성합니다.
+   * @returns {Promise<{pageCount: number}>}
+   */
+  async createNewDocument(options = {}) {
+    return this._request('createNewDocument', {
+      skipUnsavedGuard: options.skipUnsavedGuard ?? true,
+    });
+  }
+
+  /**
+   * 현재 커서 위치에 일반 텍스트를 삽입합니다.
+   * @param {string} text
+   * @returns {Promise<{insertedChars: number, pageCount: number}>}
+   */
+  async insertText(text) {
+    return this._request('insertText', { text });
+  }
+
+  /**
    * 현재 문서를 HWP 바이너리로 내보냅니다.
    * @returns {Promise<Uint8Array>} HWP 파일 bytes
    */

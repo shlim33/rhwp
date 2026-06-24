@@ -9,7 +9,6 @@ services:
     volumes:
       - .:/app
       - cargo-cache:/home/builder/.cargo/registry
-      - cargo-bin:/home/builder/.cargo/bin
     working_dir: /app
     command: cargo build
 
@@ -23,7 +22,6 @@ services:
     volumes:
       - .:/app
       - cargo-cache:/home/builder/.cargo/registry
-      - cargo-bin:/home/builder/.cargo/bin
     working_dir: /app
     command: cargo test
 
@@ -37,12 +35,10 @@ services:
     volumes:
       - .:/app
       - cargo-cache:/home/builder/.cargo/registry
-      - cargo-bin:/home/builder/.cargo/bin
       - wasm-pack-cache:/home/builder/.cache/.wasm-pack
     working_dir: /app
     command: wasm-pack build --target web
 
 volumes:
   cargo-cache:
-  cargo-bin:
   wasm-pack-cache:
