@@ -95,6 +95,8 @@ export class InputHandler {
   private pictureObjectRenderer: TableObjectRenderer | null = null;
   /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
   private rhwpClipboardToken: string | null = null;
+  /** 선택 영역 없이 글꼴/크기 등을 바꿨을 때 이후 입력에 적용할 글자 서식 */
+  private pendingCharProps: Partial<CharProperties> | undefined;
 
   // 마우스 드래그 선택 상태
   private isDragging = false;
@@ -409,8 +411,11 @@ export class InputHandler {
     // Toolbar에서 서식 적용 요청 수신 (글꼴명, 크기, 색상 — 커맨드 시스템 미경유)
     eventBus.on('format-char', (props) => {
       if (!this.active) return;
+      const charProps = props as Partial<CharProperties>;
       if (this.cursor.hasSelection()) {
-        this.applyCharFormat(props as Partial<CharProperties>);
+        this.applyCharFormat(charProps);
+      } else {
+        this.pendingCharProps = { ...(this.pendingCharProps ?? {}), ...charProps };
       }
       // 서식바 조작으로 빠진 포커스를 항상 복원
       this.focusTextarea();
@@ -1299,7 +1304,30 @@ export class InputHandler {
     const sel = this.cursor.getSelectionOrdered();
     if (!sel) return;
     const cmd = new ApplyCharFormatCommand(sel.start, sel.end, props);
-    this.executeOperation({ kind: 'command', command: cmd });
+    // applyCharFormat 은 문서 구조 불변 → 선택 유지 (executeOperation 'command' 케이스와 동일).
+    // 단, 글자크기/글꼴/장평 등 줄 높이·너비를 바꾸는 서식은 linesegs 를 reflow 해야
+    // 페이지 레이아웃과 caret 이 어긋나지 않는다. reflow 없이 재렌더하면 stale linesegs
+    // 위에 큰 글자가 그려져 내용이 다음 페이지로 밀리고 caret 이 점프한다 (글자크기 점프 버그).
+    this.history.execute(cmd, this.wasm);
+    if (this.charFormatAffectsLineMetrics(props)) {
+      this.wasm.reflowLinesegs();
+    }
+    this.afterEdit();
+  }
+
+  /** 줄 메트릭(높이/너비)을 바꾸는 서식인지 — 그러면 reflow 필요 */
+  private charFormatAffectsLineMetrics(props: Partial<CharProperties>): boolean {
+    const metricKeys: (keyof CharProperties)[] = [
+      'fontSize',
+      'fontId',
+      'fontIds',
+      'fontName',
+      'fontFamilies',
+      'ratios',
+      'relativeSizes',
+      'spacings',
+    ];
+    return metricKeys.some((k) => props[k] != null);
   }
 
   /** 토글 서식 적용 (상호 배타 처리 포함) */
@@ -1358,7 +1386,12 @@ export class InputHandler {
         // 셀 내 선택이 있으면 선택 범위 내 모든 셀 문단에 적용
         const sel = this.cursor.getSelectionOrdered();
         if (sel && sel.start.cellParaIndex !== undefined && sel.end.cellParaIndex !== undefined) {
-          for (let cp = sel.start.cellParaIndex; cp <= sel.end.cellParaIndex; cp++) {
+          // 선택 끝이 다음 문단 offset 0 이면 그 문단은 실제로 선택된 게 아니므로 제외.
+          let endCp = sel.end.cellParaIndex;
+          if (endCp > sel.start.cellParaIndex && sel.end.charOffset === 0) {
+            endCp -= 1;
+          }
+          for (let cp = sel.start.cellParaIndex; cp <= endCp; cp++) {
             this.wasm.applyParaFormatInCell(
               pos.sectionIndex, pos.parentParaIndex, pos.controlIndex!,
               pos.cellIndex!, cp, propsJson,
@@ -1374,7 +1407,14 @@ export class InputHandler {
         // 선택이 있으면 선택 범위 내 모든 문단에 적용
         const sel = this.cursor.getSelectionOrdered();
         if (sel) {
-          for (let p = sel.start.paragraphIndex; p <= sel.end.paragraphIndex; p++) {
+          // 선택 끝이 다음 문단 offset 0 이면(그 문단은 실제로 선택 영역에 포함되지
+          // 않음) 제외 — 한 문단만 선택해도 다음 문단까지 글머리/문단서식이 번지는
+          // off-by-one 방지.
+          let endP = sel.end.paragraphIndex;
+          if (endP > sel.start.paragraphIndex && sel.end.charOffset === 0) {
+            endP -= 1;
+          }
+          for (let p = sel.start.paragraphIndex; p <= endP; p++) {
             this.wasm.applyParaFormat(pos.sectionIndex, p, propsJson);
           }
         } else {

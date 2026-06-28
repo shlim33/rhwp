@@ -140,6 +140,9 @@ pub fn parse_hwpx_header(xml: &str) -> Result<(DocInfo, DocProperties), HwpxErro
                     b"numbering" => {
                         parse_numbering(e, &mut reader, &mut doc_info)?;
                     }
+                    b"bullet" => {
+                        parse_bullet(e, &mut reader, &mut doc_info)?;
+                    }
                     _ => {}
                 }
             }
@@ -147,6 +150,7 @@ pub fn parse_hwpx_header(xml: &str) -> Result<(DocInfo, DocProperties), HwpxErro
                 let name = e.name(); let local = local_name(name.as_ref());
                 match local {
                     b"beginNum" => parse_begin_num(e, &mut doc_props),
+                    b"bullet" => parse_bullet_attrs(e, &mut doc_info),
                     b"font" => parse_font(e, &mut doc_info, current_font_group),
                     b"style" => parse_style(e, &mut doc_info),
                     b"tabPr" => {
@@ -1208,6 +1212,55 @@ fn parse_numbering(
     Ok(())
 }
 
+// ─── Bullet ───
+// `<hh:bullets>/<hh:bullet>` 글머리표 정의. 직렬화기(write_bullets)는 이를 쓰지만
+// 파서에 누락돼 있어 재열기 시 doc_info.bullets 가 비어 글머리가 사라졌다.
+// numbering(idRef) 과 동일하게 heading(type=BULLET, idRef) 이 참조하며,
+// 렌더는 bullets[(numbering_id-1)] 로 조회한다.
+
+fn parse_bullet_attrs(e: &quick_xml::events::BytesStart, doc_info: &mut DocInfo) {
+    let mut bullet = Bullet::default();
+    for attr in e.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"char" => {
+                bullet.bullet_char = attr_str(&attr).chars().next().unwrap_or('\u{FFFF}');
+            }
+            b"checkedChar" => {
+                bullet.check_bullet_char = attr_str(&attr).chars().next().unwrap_or('\0');
+            }
+            b"useImage" => {
+                bullet.image_bullet = if attr_str(&attr) == "1" { 1 } else { 0 };
+            }
+            _ => {}
+        }
+    }
+    doc_info.bullets.push(bullet);
+}
+
+fn parse_bullet(
+    e: &quick_xml::events::BytesStart,
+    reader: &mut Reader<&[u8]>,
+    doc_info: &mut DocInfo,
+) -> Result<(), HwpxError> {
+    parse_bullet_attrs(e, doc_info);
+    // 자식(paraHead, img 등)은 글머리 문자 렌더에 불필요 → </bullet> 까지 소비.
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::End(ref ee)) => {
+                if local_name(ee.name().as_ref()) == b"bullet" {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(HwpxError::XmlError(format!("bullet: {}", e))),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
 // ─── 유틸리티 함수 (header 전용) ───
 
 fn is_empty_event(_e: &quick_xml::events::BytesStart) -> bool {
@@ -1277,6 +1330,21 @@ fn parse_border_width(attr: &quick_xml::events::attributes::Attribute) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_bullet_populates_doc_info() {
+        let xml = r#"<hh:bullet id="1" char="■" useImage="0"><hh:paraHead level="0" align="LEFT"/></hh:bullet>"#;
+        let mut reader = Reader::from_str(xml);
+        let mut buf = Vec::new();
+        let mut doc_info = DocInfo::default();
+        if let Ok(Event::Start(ref e)) = reader.read_event_into(&mut buf) {
+            parse_bullet(e, &mut reader, &mut doc_info).unwrap();
+        } else {
+            panic!("expected Start event");
+        }
+        assert_eq!(doc_info.bullets.len(), 1, "bullet must be parsed");
+        assert_eq!(doc_info.bullets[0].bullet_char, '■');
+    }
 
     #[test]
     fn test_parse_color_rgb() {

@@ -501,7 +501,16 @@ async function initializeDocument(docInfo: DocumentInfo, displayName: string): P
       const report = wasm.getValidationWarnings();
       console.log(`[validation] ${report.count} warnings`, report.summary);
       if (report.count > 0) {
-        const choice = await showValidationModalIfNeeded(report);
+        // Craftnote embed: generated worksheets always rely on Hancom textRun
+        // reflow (1 lineseg/para), so the warning fires on every open. Skip the
+        // modal and auto-fix (reflow) silently — render quality is preserved
+        // without nagging the user.
+        const isEmbed =
+          new URLSearchParams(window.location.search).get('craftnoteEmbed') ===
+          '1';
+        const choice = isEmbed
+          ? 'auto-fix'
+          : await showValidationModalIfNeeded(report);
         console.log(`[validation] user choice: ${choice}`);
         if (choice === 'auto-fix') {
           const n = wasm.reflowLinesegs();
@@ -565,6 +574,7 @@ async function loadBytes(
  * - 상태 표시줄 메시지
  */
 function notifyHwpxSaveModeIfNeeded(): void {
+  if (new URLSearchParams(window.location.search).get('craftnoteEmbed') === '1') return;
   if (wasm.getSourceFormat() !== 'hwpx') return;
 
   showToast({
@@ -851,6 +861,13 @@ window.addEventListener('message', async (e) => {
         await initPromise;
         reply(wasm.renderPageSvg(params.page ?? 0));
         break;
+      case 'reflowLinesegs': {
+        await initPromise;
+        const reflowed = wasm.reflowLinesegs();
+        canvasView?.loadDocument();
+        reply({ reflowed, pageCount: wasm.pageCount });
+        break;
+      }
       case 'exportHwp':
         await initPromise;
         reply(Array.from(wasm.exportHwp()));
@@ -862,6 +879,38 @@ window.addEventListener('message', async (e) => {
       case 'exportHwpVerify':
         await initPromise;
         reply(JSON.parse(wasm.exportHwpVerify()));
+        break;
+      // Craftnote: read-only content getters for op-capture save — extract
+      // current paragraph text + char styling to diff against the original
+      // HWPX. See docs/rhwp-fork-management.md (Craftnote fork delta).
+      case 'getParagraphCount':
+        await initPromise;
+        reply(wasm.getParagraphCount(params?.section ?? 0));
+        break;
+      case 'getParagraphLength':
+        await initPromise;
+        reply(wasm.getParagraphLength(params?.section ?? 0, params?.para ?? 0));
+        break;
+      case 'getTextRange':
+        await initPromise;
+        reply(
+          wasm.getTextRange(
+            params?.section ?? 0,
+            params?.para ?? 0,
+            params?.charOffset ?? 0,
+            params?.count ?? 0,
+          ),
+        );
+        break;
+      case 'getCharPropertiesAt':
+        await initPromise;
+        reply(
+          wasm.getCharPropertiesAt(
+            params?.section ?? 0,
+            params?.para ?? 0,
+            params?.charOffset ?? 0,
+          ),
+        );
         break;
       default:
         reply(undefined, `Unknown method: ${method}`);

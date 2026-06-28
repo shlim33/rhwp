@@ -24,6 +24,7 @@ use quick_xml::Writer;
 use crate::model::control::{Control, Equation};
 use crate::model::footnote::{Footnote, Endnote};
 use crate::model::document::{Document, Section};
+use crate::model::page::PageDef;
 use crate::model::paragraph::{ColumnBreakType, LineSeg, Paragraph};
 use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertAlign, VertRelTo};
 
@@ -94,18 +95,58 @@ pub fn write_section(
         for (idx, p) in section.paragraphs.iter().enumerate().skip(1) {
             let (t, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
             vert_cursor = advance;
-            let cs = first_run_char_shape_id(p);
             extra.push_str(&render_hp_p_open(p, idx as u32));
-            extra.push_str(&format!(r#"<hp:run charPrIDRef="{}">"#, cs));
-            extra.push_str(&t);
-            extra.push_str(r#"</hp:run><hp:linesegarray>"#);
+            if p.controls.is_empty() && p.char_shapes.len() > 1 {
+                // 플레인 텍스트 + 여러 글자모양 → 스팬별 run 분할 (부분 서식 보존).
+                extra.push_str(&render_split_text_runs(p));
+            } else {
+                let cs = first_run_char_shape_id(p);
+                extra.push_str(&format!(r#"<hp:run charPrIDRef="{}">{}</hp:run>"#, cs, t));
+            }
+            extra.push_str(r#"<hp:linesegarray>"#);
             extra.push_str(&linesegs);
             extra.push_str(r#"</hp:linesegarray></hp:p>"#);
         }
         out = out.replacen(PARA_CLOSE, &format!("</hp:p>{}</hs:sec>", extra), 1);
     }
 
+    // 템플릿 secPr 의 <hp:pagePr> 를 IR(PageDef)의 실제 용지/여백으로 교체.
+    // (Stage 2 는 secPr 전체를 하드코딩 템플릿으로 쓰므로, 저장 시 문서 여백이
+    //  템플릿 여백으로 바뀌어 내용이 밀리는 문제가 있었다. 최소한 페이지 여백은
+    //  IR 기반으로 바로잡는다.)
+    out = replace_page_pr(out, &section.section_def.page_def);
+
     Ok(out.into_bytes())
+}
+
+/// 템플릿의 `<hp:pagePr>...</hp:pagePr>` 블록을 IR의 PageDef 값으로 교체한다.
+fn replace_page_pr(out: String, pd: &PageDef) -> String {
+    let landscape = if pd.landscape { "WIDELY" } else { "NARROWLY" };
+    let new_pagepr = format!(
+        r#"<hp:pagePr landscape="{}" width="{}" height="{}" gutterType="LEFT_ONLY"><hp:margin header="{}" footer="{}" gutter="{}" left="{}" right="{}" top="{}" bottom="{}"/></hp:pagePr>"#,
+        landscape,
+        pd.width,
+        pd.height,
+        pd.margin_header,
+        pd.margin_footer,
+        pd.margin_gutter,
+        pd.margin_left,
+        pd.margin_right,
+        pd.margin_top,
+        pd.margin_bottom,
+    );
+    const CLOSE: &str = "</hp:pagePr>";
+    match (out.find("<hp:pagePr"), out.find(CLOSE)) {
+        (Some(s), Some(e)) if e >= s => {
+            let end = e + CLOSE.len();
+            let mut result = String::with_capacity(out.len());
+            result.push_str(&out[..s]);
+            result.push_str(&new_pagepr);
+            result.push_str(&out[end..]);
+            result
+        }
+        _ => out,
+    }
 }
 
 /// IR의 Paragraph를 기반으로 `<hp:p>` 시작 태그를 생성.
@@ -125,6 +166,44 @@ fn render_hp_p_open(p: &Paragraph, id: u32) -> String {
 /// 비어있으면 0 (기본 글자모양) 반환.
 fn first_run_char_shape_id(p: &Paragraph) -> u32 {
     p.char_shapes.first().map(|r| r.char_shape_id).unwrap_or(0)
+}
+
+/// 플레인 텍스트 문단을 `char_shapes` 스팬별로 여러 `<hp:run>` 으로 분할 직렬화.
+///
+/// Stage 2 는 문단 전체를 `char_shapes[0]` 한 run 으로 감쌌기 때문에, 한 줄의 일부에만
+/// 적용한 서식(굵게/색/밑줄 등)이 exportHwpx 왕복에서 사라졌다. 각 글자모양 스팬
+/// `[start_pos, 다음 start_pos)` 마다 별도 run 을 emit 하여 부분 서식을 보존한다.
+/// 컨트롤(표/그림)이 있는 문단에는 적용하지 않는다(호출부에서 게이트).
+fn render_split_text_runs(para: &Paragraph) -> String {
+    let mut shapes: Vec<_> = para.char_shapes.iter().collect();
+    shapes.sort_by_key(|s| s.start_pos);
+
+    let mut out = String::new();
+    let mut buf = String::new();
+    let mut cur = 0usize;
+    let mut u16pos = 0u32;
+    for c in para.text.chars() {
+        while cur + 1 < shapes.len() && u16pos >= shapes[cur + 1].start_pos {
+            if !buf.is_empty() {
+                out.push_str(&format!(
+                    r#"<hp:run charPrIDRef="{}">{}</hp:run>"#,
+                    shapes[cur].char_shape_id,
+                    render_hp_t_content(&buf),
+                ));
+                buf.clear();
+            }
+            cur += 1;
+        }
+        buf.push(c);
+        u16pos += char_utf16_width(c);
+    }
+    let cs = shapes.get(cur).map(|s| s.char_shape_id).unwrap_or(0);
+    out.push_str(&format!(
+        r#"<hp:run charPrIDRef="{}">{}</hp:run>"#,
+        cs,
+        render_hp_t_content(&buf),
+    ));
+    out
 }
 
 /// Paragraph 하나를 (`<hp:t>` XML, lineseg XML, 다음 vert_cursor)로 변환.
@@ -673,6 +752,76 @@ mod tests {
             xml.contains(r#"<hp:run charPrIDRef="42"><hp:t>hello</hp:t>"#),
             "first run must use char_shape_id 42, xml excerpt around <hp:t>: {:?}",
             xml.find("<hp:t>").map(|i| &xml[i.saturating_sub(50)..(i + 50).min(xml.len())])
+        );
+    }
+
+    #[test]
+    fn extra_paragraph_splits_runs_by_char_shape() {
+        // Sub-range formatting: "ab" with 'a' in char shape 5 and 'b' in shape 6.
+        // The paragraph must serialize as TWO runs, not one (Stage 2 regression).
+        let first = {
+            let mut p = Paragraph::default();
+            p.text = "title".to_string();
+            p
+        };
+        let mut para = Paragraph::default();
+        para.text = "ab".to_string();
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 5,
+        });
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 1,
+            char_shape_id: 6,
+        });
+        let mut section = Section::default();
+        section.paragraphs.push(first);
+        section.paragraphs.push(para);
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            xml.contains(r#"<hp:run charPrIDRef="5"><hp:t>a</hp:t></hp:run>"#),
+            "first span must use char shape 5: {}",
+            xml
+        );
+        assert!(
+            xml.contains(r#"<hp:run charPrIDRef="6"><hp:t>b</hp:t></hp:run>"#),
+            "second span must use char shape 6: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn page_pr_reflects_ir_margins() {
+        // The page margins must come from the IR's PageDef, not the hard-coded
+        // template (which uses left=8504 → content shifted right on save).
+        let mut para = Paragraph::default();
+        para.text = "hi".to_string();
+        let mut section = Section::default();
+        section.paragraphs.push(para);
+        section.section_def.page_def.margin_left = 4252;
+        section.section_def.page_def.margin_right = 4252;
+        section.section_def.page_def.margin_top = 1417;
+        section.section_def.page_def.width = 59528;
+        section.section_def.page_def.height = 84188;
+        section.section_def.page_def.landscape = true;
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            xml.contains(r#"left="4252""#),
+            "pagePr must use IR margin_left=4252: {}",
+            xml
+        );
+        assert!(xml.contains(r#"top="1417""#), "pagePr must use IR margin_top");
+        assert!(
+            !xml.contains(r#"left="8504""#),
+            "hard-coded template margin must be replaced"
         );
     }
 

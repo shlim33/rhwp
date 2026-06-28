@@ -6,6 +6,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
 
 export default defineConfig({
+  base: '/rhwp-studio/',
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
@@ -57,6 +58,11 @@ export default defineConfig({
     },
     VitePWA({
       registerType: 'autoUpdate',
+      // Craftnote embeds rhwp-studio in an iframe; the PWA service worker provides
+      // no value here and its CacheFirst WASM + precached bundle served stale assets
+      // after every rebuild (edits appeared not to take effect). selfDestroying emits
+      // a SW that unregisters itself and purges all caches, so deploys always apply.
+      selfDestroying: true,
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
         name: 'rhwp-studio',
@@ -66,8 +72,8 @@ export default defineConfig({
         theme_color: '#2b6cb0',
         background_color: '#ffffff',
         display: 'standalone',
-        start_url: '/rhwp/',
-        scope: '/rhwp/',
+        start_url: '/rhwp-studio/',
+        scope: '/rhwp-studio/',
         icons: [
           { src: 'icons/icon-128.png', sizes: '128x128', type: 'image/png' },
           { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },

@@ -28,6 +28,7 @@ use std::io::Write;
 
 use quick_xml::Writer;
 
+use crate::model::paragraph::Paragraph;
 use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo, HorzAlign, HorzRelTo};
 use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
 
@@ -243,7 +244,9 @@ fn write_sub_list<W: Write>(
     for (pi, para) in cell.paragraphs.iter().enumerate() {
         ctx.para_shape_ids.reference(para.para_shape_id);
         ctx.style_ids.reference(para.style_id as u16);
-        if let Some(cs_ref) = para.char_shapes.first() {
+        // Reference EVERY char shape used in the cell (not just the first) so the
+        // header charPr pool includes shapes used by split runs (sub-range format).
+        for cs_ref in &para.char_shapes {
             ctx.char_shape_ids.reference(cs_ref.char_shape_id);
         }
 
@@ -263,12 +266,8 @@ fn write_sub_list<W: Write>(
             ],
         )?;
 
-        let cs = para.char_shapes.first().map(|r| r.char_shape_id).unwrap_or(0);
-        let cs_str = cs.to_string();
-        start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
-        // 텍스트만 출력 (탭·소프트브레이크는 Stage 3 범위에서 제외 — section.rs 와 동일 방식으로 단순화)
-        write_cell_text(w, &para.text)?;
-        end_tag(w, "hp:run")?;
+        // 셀 단락도 char_shape 스팬별로 run 분할 (셀 안 텍스트 부분 서식 보존).
+        write_cell_paragraph_runs(w, para)?;
 
         // <hp:linesegarray> 최소 1개 lineseg
         start_tag(w, "hp:linesegarray")?;
@@ -294,6 +293,46 @@ fn write_sub_list<W: Write>(
 
     end_tag(w, "hp:subList")?;
     Ok(())
+}
+
+/// 셀 단락의 `<hp:run>` 들을 출력한다. 글자모양이 하나면 단일 run, 여러 스팬이면
+/// `char_shapes` 의 `[start_pos, 다음 start_pos)` 마다 run 을 분할하여 셀 안 텍스트의
+/// 부분 서식(굵게/색/밑줄 등)을 보존한다. (section.rs `render_split_text_runs` 와 동형.)
+fn write_cell_paragraph_runs<W: Write>(
+    w: &mut Writer<W>,
+    para: &Paragraph,
+) -> Result<(), SerializeError> {
+    let write_run = |w: &mut Writer<W>, cs: u32, text: &str| -> Result<(), SerializeError> {
+        let cs_str = cs.to_string();
+        start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
+        write_cell_text(w, text)?;
+        end_tag(w, "hp:run")
+    };
+
+    if para.char_shapes.len() <= 1 {
+        let cs = para.char_shapes.first().map(|r| r.char_shape_id).unwrap_or(0);
+        return write_run(w, cs, &para.text);
+    }
+
+    let mut shapes: Vec<_> = para.char_shapes.iter().collect();
+    shapes.sort_by_key(|s| s.start_pos);
+
+    let mut buf = String::new();
+    let mut cur = 0usize;
+    let mut u16pos = 0u32;
+    for c in para.text.chars() {
+        while cur + 1 < shapes.len() && u16pos >= shapes[cur + 1].start_pos {
+            if !buf.is_empty() {
+                write_run(w, shapes[cur].char_shape_id, &buf)?;
+                buf.clear();
+            }
+            cur += 1;
+        }
+        buf.push(c);
+        u16pos += c.len_utf16() as u32;
+    }
+    let cs = shapes.get(cur).map(|s| s.char_shape_id).unwrap_or(0);
+    write_run(w, cs, &buf)
 }
 
 fn write_cell_text<W: Write>(w: &mut Writer<W>, text: &str) -> Result<(), SerializeError> {
@@ -461,6 +500,33 @@ mod tests {
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
         write_table(&mut w, table, &mut ctx).expect("write_table");
         String::from_utf8(w.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn cell_paragraph_splits_runs_by_char_shape() {
+        use crate::model::paragraph::CharShapeRef;
+        let mut t = empty_table(1, 1);
+        let para = &mut t.cells[0].paragraphs[0];
+        para.text = "ab".to_string();
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 5,
+        });
+        para.char_shapes.push(CharShapeRef {
+            start_pos: 1,
+            char_shape_id: 6,
+        });
+        let xml = serialize(&t);
+        assert!(
+            xml.contains(r#"<hp:run charPrIDRef="5"><hp:t>a</hp:t></hp:run>"#),
+            "cell first span must use char shape 5: {}",
+            xml
+        );
+        assert!(
+            xml.contains(r#"<hp:run charPrIDRef="6"><hp:t>b</hp:t></hp:run>"#),
+            "cell second span must use char shape 6: {}",
+            xml
+        );
     }
 
     #[test]

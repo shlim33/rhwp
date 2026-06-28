@@ -425,8 +425,18 @@ export class Toolbar {
     ];
 
     let popup: HTMLDivElement | null = null;
+    // 외부 클릭 닫기 리스너 — 닫을 때 반드시 함께 제거(누수 시 다음 팝업을 즉시 닫는 버그).
+    let closeHandler: ((e: MouseEvent) => void) | null = null;
+    const closePopup = () => {
+      if (popup) { popup.remove(); popup = null; }
+      if (closeHandler) {
+        document.removeEventListener('mousedown', closeHandler);
+        closeHandler = null;
+      }
+    };
+
     const showPopup = () => {
-      if (popup) { popup.remove(); popup = null; return; }
+      if (popup) { closePopup(); return; } // 토글: 열려 있으면 닫고 끝
       popup = document.createElement('div');
       popup.className = 'bullet-popup';
       popup.style.cssText = 'position:absolute;z-index:1000;background:#fff;border:1px solid #b0b8c8;border-radius:3px;box-shadow:0 2px 6px rgba(0,0,0,0.15);padding:4px;display:grid;grid-template-columns:repeat(6,1fr);gap:2px;';
@@ -442,8 +452,7 @@ export class Toolbar {
         cell.addEventListener('mousedown', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          popup?.remove();
-          popup = null;
+          closePopup();
           this.dispatcher.dispatch('format:apply-bullet', { bulletChar: ch });
         });
         cell.addEventListener('mouseenter', () => { cell.style.background = '#e7eaf4'; });
@@ -451,13 +460,16 @@ export class Toolbar {
         popup.appendChild(cell);
       }
       document.body.appendChild(popup);
-      const close = (e: MouseEvent) => {
-        if (popup && !popup.contains(e.target as Node) && e.target !== btn) {
-          popup.remove(); popup = null;
-          document.removeEventListener('mousedown', close);
+      // 버튼(또는 그 자식 아이콘)·팝업 바깥을 클릭하면 닫는다. `btn.contains` 로 자식
+      // 클릭도 버튼 클릭으로 취급(누수된 리스너가 새 팝업을 닫던 버그 방지).
+      closeHandler = (e: MouseEvent) => {
+        const t = e.target as Node;
+        if (popup && !popup.contains(t) && !btn.contains(t)) {
+          closePopup();
         }
       };
-      setTimeout(() => document.addEventListener('mousedown', close), 0);
+      const handler = closeHandler;
+      setTimeout(() => document.addEventListener('mousedown', handler), 0);
     };
 
     btn.addEventListener('mousedown', (e) => {

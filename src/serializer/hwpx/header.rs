@@ -17,8 +17,8 @@ use quick_xml::Writer;
 
 use crate::model::document::{DocInfo, DocProperties, Document};
 use crate::model::style::{
-    Alignment, BorderFill, BorderLine, BorderLineType, CharShape, DiagonalLine, FillType, Font,
-    HeadType, LineSpacingType, Numbering, ParaShape, Style, TabDef,
+    Alignment, BorderFill, BorderLine, BorderLineType, Bullet, CharShape, DiagonalLine, FillType,
+    Font, HeadType, LineSpacingType, Numbering, ParaShape, Style, TabDef,
 };
 use crate::model::ColorRef;
 
@@ -66,6 +66,7 @@ pub fn write_header(doc: &Document, ctx: &SerializeContext) -> Result<Vec<u8>, S
     write_char_properties(&mut w, &doc.doc_info, ctx)?;
     write_tab_properties(&mut w, &doc.doc_info)?;
     write_numberings(&mut w, &doc.doc_info)?;
+    write_bullets(&mut w, &doc.doc_info)?;
     write_para_properties(&mut w, &doc.doc_info, ctx)?;
     write_styles(&mut w, &doc.doc_info, ctx)?;
     end_tag(&mut w, "hh:refList")?;
@@ -662,6 +663,67 @@ fn write_numbering<W: Write>(
 }
 
 // =====================================================================
+// <hh:bullets> — 글머리표 정의 풀.
+//
+// 글머리표(`format:apply-bullet` → `ensureDefaultBullet`)는 `doc_info.bullets` 에
+// 추가되고 문단 ParaShape 의 heading(type=BULLET, idRef=글머리 id)이 이를 참조한다.
+// 이 풀이 직렬화되지 않으면 idRef 가 끊겨 재열기 시 글머리가 사라진다.
+// id 는 `ensure_default_bullet` 의 1-based(idx+1) 규칙과 일치시킨다.
+// =====================================================================
+fn write_bullets<W: Write>(
+    w: &mut Writer<W>,
+    doc_info: &DocInfo,
+) -> Result<(), SerializeError> {
+    if doc_info.bullets.is_empty() {
+        return Ok(());
+    }
+    start_tag_attrs(
+        w,
+        "hh:bullets",
+        &[("itemCnt", &doc_info.bullets.len().to_string())],
+    )?;
+    for (idx, b) in doc_info.bullets.iter().enumerate() {
+        write_bullet(w, idx as u16, b)?;
+    }
+    end_tag(w, "hh:bullets")?;
+    Ok(())
+}
+
+fn write_bullet<W: Write>(w: &mut Writer<W>, id: u16, b: &Bullet) -> Result<(), SerializeError> {
+    let id_s = (id + 1).to_string(); // 1-based (ensure_default_bullet 규칙)
+    let char_s = if b.bullet_char == '\0' {
+        String::new()
+    } else {
+        b.bullet_char.to_string()
+    };
+    let use_image = if b.image_bullet != 0 { "1" } else { "0" };
+    start_tag_attrs(
+        w,
+        "hh:bullet",
+        &[("id", &id_s), ("char", &char_s), ("useImage", use_image)],
+    )?;
+    let wa = b.width_adjust.to_string();
+    empty_tag(
+        w,
+        "hh:paraHead",
+        &[
+            ("level", "0"),
+            ("align", "LEFT"),
+            ("useInstWidth", "0"),
+            ("autoIndent", "1"),
+            ("widthAdjust", &wa),
+            ("textOffsetType", "PERCENT"),
+            ("textOffset", "50"),
+            ("numFormat", "DIGIT"),
+            ("charPrIDRef", "4294967295"),
+            ("checkable", "0"),
+        ],
+    )?;
+    end_tag(w, "hh:bullet")?;
+    Ok(())
+}
+
+// =====================================================================
 // <hh:paraProperties>
 // =====================================================================
 fn write_para_properties<W: Write>(
@@ -916,6 +978,31 @@ mod tests {
         let xml = std::str::from_utf8(&bytes).unwrap();
         assert!(xml.contains("<hh:head"));
         assert!(xml.contains("</hh:head>"));
+    }
+
+    #[test]
+    fn write_header_serializes_bullets_pool() {
+        // A bullet applied in the editor (doc_info.bullets) must serialize as
+        // <hh:bullets>/<hh:bullet> so the paragraph heading idRef resolves on reopen.
+        let mut doc = Document::default();
+        doc.doc_info.bullets.push(Bullet {
+            bullet_char: '●',
+            text_distance: 50,
+            ..Default::default()
+        });
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_header(&doc, &ctx).expect("write_header");
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            xml.contains(r#"<hh:bullets itemCnt="1">"#),
+            "must emit <hh:bullets>: {}",
+            xml
+        );
+        assert!(
+            xml.contains(r#"<hh:bullet id="1" char="●" useImage="0">"#),
+            "must emit <hh:bullet> with 1-based id + char: {}",
+            xml
+        );
     }
 
     #[test]
