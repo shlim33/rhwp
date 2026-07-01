@@ -90,6 +90,7 @@ pub fn write_table<W: Write>(
     write_pos(w, &table.common)?;
     write_out_margin(w, table)?;
     write_in_margin(w, table)?;
+    write_cellzone_list(w, table)?;
 
     // tr[]: 행 단위 반복. 각 행에 속한 셀 (cell.row == r) 을 col 오름차순으로 출력.
     for row_idx in 0..table.row_count {
@@ -181,6 +182,38 @@ fn write_in_margin<W: Write>(w: &mut Writer<W>, t: &Table) -> Result<(), Seriali
             ("bottom", &bottom),
         ],
     )
+}
+
+/// `<hp:cellzoneList>` — 표 구역별 테두리/배경 (옵셔널).
+/// 위치는 inMargin 뒤, 첫 tr 앞 (모듈 doc-comment 의 OWPML 자식 순서 + 한컴 관찰: aift.hwpx).
+/// 속성 순서는 한컴 관찰값: startRowAddr → startColAddr → endRowAddr → endColAddr → borderFillIDRef.
+/// borderFillIDRef 는 셀의 borderFillIDRef 출력과 동일하게 IR 의 border_fill_id 를 그대로 사용
+/// (parser 도 parse_u16 으로 그대로 되읽음 — src/parser/hwpx/section.rs `cellzone` 분기).
+fn write_cellzone_list<W: Write>(w: &mut Writer<W>, t: &Table) -> Result<(), SerializeError> {
+    if t.zones.is_empty() {
+        return Ok(());
+    }
+    start_tag(w, "hp:cellzoneList")?;
+    for zone in &t.zones {
+        let sr = zone.start_row.to_string();
+        let sc = zone.start_col.to_string();
+        let er = zone.end_row.to_string();
+        let ec = zone.end_col.to_string();
+        let bf_ref = zone.border_fill_id.to_string();
+        empty_tag(
+            w,
+            "hp:cellzone",
+            &[
+                ("startRowAddr", &sr),
+                ("startColAddr", &sc),
+                ("endRowAddr", &er),
+                ("endColAddr", &ec),
+                ("borderFillIDRef", &bf_ref),
+            ],
+        )?;
+    }
+    end_tag(w, "hp:cellzoneList")?;
+    Ok(())
 }
 
 fn write_cell<W: Write>(
@@ -590,6 +623,109 @@ mod tests {
         let t = empty_table(1, 1);
         let xml = serialize(&t);
         assert!(xml.contains(r#"<hp:cellSpan colSpan="1" rowSpan="1"/>"#));
+    }
+
+    // ---------------------------------------------------------------
+    // cellzoneList (표 구역 테두리/배경) 직렬화 + 라운드트립
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cellzone_list_emitted_between_in_margin_and_rows() {
+        use crate::model::table::TableZone;
+
+        let mut t = empty_table(2, 2);
+        t.zones.push(TableZone {
+            start_col: 0,
+            start_row: 0,
+            end_col: 1,
+            end_row: 1,
+            border_fill_id: 2,
+        });
+        let xml = serialize(&t);
+        let im = xml.find("<hp:inMargin ").expect("inMargin");
+        let cz = xml
+            .find("<hp:cellzoneList>")
+            .expect("cellzoneList must be emitted when zones exist");
+        let tr = xml.find("<hp:tr>").expect("tr");
+        assert!(
+            im < cz && cz < tr,
+            "cellzoneList must sit between inMargin and first tr: {}",
+            xml
+        );
+        // 한컴 관찰 (aift.hwpx / tac-img-02.hwpx): startRowAddr → startColAddr →
+        // endRowAddr → endColAddr → borderFillIDRef 순서
+        assert!(
+            xml.contains(
+                r#"<hp:cellzone startRowAddr="0" startColAddr="0" endRowAddr="1" endColAddr="1" borderFillIDRef="2"/>"#
+            ),
+            "cellzone attrs missing or misordered: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn cellzone_list_omitted_when_no_zones() {
+        let t = empty_table(1, 1);
+        let xml = serialize(&t);
+        assert!(
+            !xml.contains("cellzoneList"),
+            "zone 없는 표에는 cellzoneList 를 내보내지 않는다: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn table_zones_roundtrip_through_hwpx() {
+        use crate::model::control::Control;
+        use crate::model::table::TableZone;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        // 셀 문단이 참조하는 para_shape/style 0 + zone 이 참조하는 borderFill 0..=2 등록
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        for _ in 0..3 {
+            doc.doc_info.border_fills.push(crate::model::style::BorderFill::default());
+        }
+
+        let mut t = empty_table(2, 2);
+        t.zones.push(TableZone {
+            start_col: 0,
+            start_row: 1,
+            end_col: 1,
+            end_row: 1,
+            border_fill_id: 2,
+        });
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = Paragraph::default();
+        para.text = "AB".to_string();
+        para.char_offsets = vec![0, 9];
+        para.char_count = 11;
+        para.controls.push(Control::Table(Box::new(t)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let tbl = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table must survive roundtrip");
+        assert_eq!(tbl.zones.len(), 1, "zone must survive roundtrip");
+        let z = &tbl.zones[0];
+        assert_eq!(
+            (z.start_row, z.start_col, z.end_row, z.end_col),
+            (1, 0, 1, 1),
+            "zone addrs must roundtrip"
+        );
+        assert_eq!(z.border_fill_id, 2, "zone borderFillIDRef must roundtrip");
     }
 
     #[test]

@@ -17,8 +17,8 @@ use quick_xml::Writer;
 
 use crate::model::document::{DocInfo, DocProperties, Document};
 use crate::model::style::{
-    Alignment, BorderFill, BorderLine, BorderLineType, Bullet, CharShape, DiagonalLine, FillType,
-    Font, HeadType, LineSpacingType, Numbering, ParaShape, Style, TabDef,
+    Alignment, BorderFill, BorderLine, BorderLineType, Bullet, CharShape, DiagonalLine, Fill,
+    FillType, Font, HeadType, ImageFillMode, LineSpacingType, Numbering, ParaShape, Style, TabDef,
 };
 use crate::model::ColorRef;
 
@@ -166,7 +166,6 @@ fn write_border_fills<W: Write>(
     doc_info: &DocInfo,
     ctx: &SerializeContext,
 ) -> Result<(), SerializeError> {
-    let _ = ctx;
     if doc_info.border_fills.is_empty() {
         return Ok(());
     }
@@ -178,7 +177,7 @@ fn write_border_fills<W: Write>(
     // HWPX borderFill의 id는 1부터 시작 (관찰값: ref_empty.hwpx).
     // 그러나 rhwp parser는 인덱스 기반으로 저장하므로 id는 배열 인덱스 그대로 사용.
     for (idx, bf) in doc_info.border_fills.iter().enumerate() {
-        write_border_fill(w, idx as u16, bf)?;
+        write_border_fill(w, idx as u16, bf, ctx)?;
     }
     end_tag(w, "hh:borderFills")?;
     Ok(())
@@ -188,6 +187,7 @@ fn write_border_fill<W: Write>(
     w: &mut Writer<W>,
     id: u16,
     bf: &BorderFill,
+    ctx: &SerializeContext,
 ) -> Result<(), SerializeError> {
     // 속성 순서 (BorderFillType.cpp:64-68): id, threeD, shadow, centerLine, breakCellSeparateLine
     start_tag_attrs(
@@ -214,14 +214,140 @@ fn write_border_fill<W: Write>(
 
     // fillBrush: Fill이 존재할 때만
     if !matches!(bf.fill.fill_type, FillType::None) {
-        start_tag(w, "hc:fillBrush")?;
-        // Stage 1에서는 Fill 내부를 완전 직렬화하지 않고 빈 래퍼만 출력.
-        // (한컴 관찰: ref_empty의 borderFill id=2 에 빈 fillBrush 존재)
-        end_tag(w, "hc:fillBrush")?;
+        write_fill_brush(w, &bf.fill, ctx)?;
     }
 
     end_tag(w, "hh:borderFill")?;
     Ok(())
+}
+
+/// `<hc:fillBrush>` 자식 직렬화 — HWPX parser 계약
+/// (src/parser/hwpx/header.rs `parse_border_fill` 의 winBrush/gradation/imgBrush 분기)의
+/// 역방향 미러.
+fn write_fill_brush<W: Write>(
+    w: &mut Writer<W>,
+    fill: &Fill,
+    ctx: &SerializeContext,
+) -> Result<(), SerializeError> {
+    start_tag(w, "hc:fillBrush")?;
+    match fill.fill_type {
+        FillType::Solid => {
+            if let Some(solid) = &fill.solid {
+                let face = color_hex(solid.background_color);
+                let hatch = color_hex(solid.pattern_color);
+                let alpha = fill_alpha_str(fill.alpha);
+                // 속성 순서: faceColor, hatchColor, (hatchStyle), alpha (한컴 관찰: aift.hwpx 등)
+                let mut attrs: Vec<(&str, &str)> =
+                    vec![("faceColor", &face), ("hatchColor", &hatch)];
+                if let Some(hs) = hatch_style_str(solid.pattern_type) {
+                    attrs.push(("hatchStyle", hs));
+                }
+                attrs.push(("alpha", &alpha));
+                empty_tag(w, "hc:winBrush", &attrs)?;
+            }
+        }
+        FillType::Gradient => {
+            if let Some(grad) = &fill.gradient {
+                let ty = grad.gradient_type.to_string();
+                let angle = grad.angle.to_string();
+                let cx = grad.center_x.to_string();
+                let cy = grad.center_y.to_string();
+                let blur = grad.blur.to_string();
+                start_tag_attrs(
+                    w,
+                    "hc:gradation",
+                    &[
+                        ("type", &ty),
+                        ("angle", &angle),
+                        ("centerX", &cx),
+                        ("centerY", &cy),
+                        ("blur", &blur),
+                    ],
+                )?;
+                for c in &grad.colors {
+                    let v = color_hex(*c);
+                    empty_tag(w, "hc:color", &[("value", &v)])?;
+                }
+                end_tag(w, "hc:gradation")?;
+            }
+        }
+        FillType::Image => {
+            if let Some(img) = &fill.image {
+                let bright = img.brightness.to_string();
+                let contrast = img.contrast.to_string();
+                start_tag_attrs(
+                    w,
+                    "hc:imgBrush",
+                    &[
+                        ("mode", image_fill_mode_str(img.fill_mode)),
+                        ("bright", &bright),
+                        ("contrast", &contrast),
+                    ],
+                )?;
+                // binaryItemIDRef 는 그림(<hc:img>)과 동일하게 ctx.bin_data_map 을 통해
+                // manifest id 로 변환. 미등록 bin_data_id 면 img 자식만 생략 (panic 금지).
+                if let Some(manifest_id) = ctx.resolve_bin_id(img.bin_data_id) {
+                    empty_tag(w, "hc:img", &[("binaryItemIDRef", manifest_id)])?;
+                }
+                end_tag(w, "hc:imgBrush")?;
+            }
+        }
+        FillType::None => {}
+    }
+    end_tag(w, "hc:fillBrush")?;
+    Ok(())
+}
+
+/// alpha u8(0~255) → HWPX float 문자열(0.0~1.0).
+///
+/// parser 는 `(f * 255) as u8` (버림) 로 되읽으므로, 중간값은 `(a + 0.5) / 255` 로 내보내
+/// 부동소수점 반올림 오차와 무관하게 정확히 `a` 로 복원되게 한다.
+/// 한컴 관찰값(aift.hwpx 등)은 대부분 정수 표기 `alpha="0"`.
+fn fill_alpha_str(alpha: u8) -> String {
+    match alpha {
+        0 => "0".to_string(),
+        255 => "1".to_string(),
+        a => ((a as f64 + 0.5) / 255.0).to_string(),
+    }
+}
+
+/// `parse_hatch_style` (src/parser/hwpx/utils.rs) 의 역함수.
+/// pattern_type 1~6 외에는 hatchStyle 속성 자체를 생략한다 (무늬 없음).
+fn hatch_style_str(pattern_type: i32) -> Option<&'static str> {
+    match pattern_type {
+        1 => Some("HORIZONTAL"),
+        2 => Some("VERTICAL"),
+        3 => Some("BACK_SLASH"),
+        4 => Some("SLASH"),
+        5 => Some("CROSS"),
+        6 => Some("CROSS_DIAGONAL"),
+        _ => None,
+    }
+}
+
+/// ImageFillMode → OWPML `imgBrush/@mode` 문자열.
+/// parser 가 같은 variant 로 역매핑하는 문자열을 우선 사용한다.
+fn image_fill_mode_str(m: ImageFillMode) -> &'static str {
+    match m {
+        ImageFillMode::TileAll => "TILE",
+        ImageFillMode::TileHorzTop => "TILE_HORZ_TOP",
+        ImageFillMode::TileHorzBottom => "TILE_HORZ_BOTTOM",
+        ImageFillMode::TileVertLeft => "TILE_VERT_LEFT",
+        ImageFillMode::TileVertRight => "TILE_VERT_RIGHT",
+        ImageFillMode::FitToSize => "TOTAL",
+        ImageFillMode::Center => "CENTER",
+        ImageFillMode::CenterTop => "CENTER_TOP",
+        ImageFillMode::CenterBottom => "CENTER_BOTTOM",
+        ImageFillMode::LeftTop => "TOP_LEFT_ALIGN",
+        // 아래 variant 들은 rhwp parser 에 역매핑 문자열이 없다 (parser 한계).
+        // OWPML 정식 명칭으로 내보낸다.
+        ImageFillMode::LeftCenter => "LEFT_CENTER",
+        ImageFillMode::LeftBottom => "LEFT_BOTTOM",
+        ImageFillMode::RightCenter => "RIGHT_CENTER",
+        ImageFillMode::RightTop => "RIGHT_TOP",
+        ImageFillMode::RightBottom => "RIGHT_BOTTOM",
+        ImageFillMode::None => "NONE",
+    }
 }
 
 fn write_diag_line<W: Write>(w: &mut Writer<W>, name: &str) -> Result<(), SerializeError> {
@@ -1025,6 +1151,167 @@ mod tests {
         let ctx = SerializeContext::collect_from_document(&doc);
         let xml = String::from_utf8(write_header(&doc, &ctx).unwrap()).unwrap();
         assert_eq!(xml.matches("<hh:fontface ").count(), 7);
+    }
+
+    // ---------------------------------------------------------------
+    // fillBrush 라운드트립 (IR → serialize_hwpx → parse_hwpx → IR 비교)
+    // roundtrip.rs 원칙: 바이트 비교 금지, IR 의미 비교만.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn border_fill_solid_fill_roundtrips() {
+        use crate::model::style::SolidFill;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        doc.doc_info.border_fills.push(BorderFill::default()); // idx 0: 채우기 없음
+        let mut bf = BorderFill::default();
+        bf.fill.fill_type = FillType::Solid;
+        bf.fill.solid = Some(SolidFill {
+            background_color: 0x00D9D9D9,
+            pattern_color: 0x00999999,
+            pattern_type: 5, // CROSS
+        });
+        bf.fill.alpha = 255;
+        doc.doc_info.border_fills.push(bf);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        assert_eq!(parsed.doc_info.border_fills.len(), 2);
+        let rt = &parsed.doc_info.border_fills[1];
+        assert_eq!(rt.fill.fill_type, FillType::Solid, "solid fill type must survive");
+        let solid = rt.fill.solid.expect("winBrush must be parsed back as SolidFill");
+        assert_eq!(solid.background_color, 0x00D9D9D9, "faceColor must roundtrip");
+        assert_eq!(solid.pattern_color, 0x00999999, "hatchColor must roundtrip");
+        assert_eq!(solid.pattern_type, 5, "hatchStyle CROSS must roundtrip");
+        assert_eq!(rt.fill.alpha, 255, "alpha must roundtrip");
+    }
+
+    #[test]
+    fn border_fill_solid_fill_mid_alpha_roundtrips() {
+        use crate::model::style::SolidFill;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        let mut bf = BorderFill::default();
+        bf.fill.fill_type = FillType::Solid;
+        bf.fill.solid = Some(SolidFill {
+            background_color: 0x00112233,
+            pattern_color: 0xFFFFFFFF, // "none"
+            pattern_type: 0,           // 무늬 없음 → hatchStyle 생략
+        });
+        bf.fill.alpha = 128;
+        doc.doc_info.border_fills.push(bf);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rt = &parsed.doc_info.border_fills[0];
+        let solid = rt.fill.solid.expect("solid fill must survive");
+        assert_eq!(solid.background_color, 0x00112233);
+        assert_eq!(solid.pattern_color, 0xFFFFFFFF, "none hatchColor must roundtrip");
+        assert_eq!(
+            solid.pattern_type, -1,
+            "hatchStyle 생략 시 parser 계약은 pattern_type=-1 (무늬 없음)"
+        );
+        assert_eq!(rt.fill.alpha, 128, "u8 alpha must survive float attr conversion");
+    }
+
+    #[test]
+    fn border_fill_gradient_fill_roundtrips() {
+        use crate::model::style::GradientFill;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        let mut bf = BorderFill::default();
+        bf.fill.fill_type = FillType::Gradient;
+        bf.fill.gradient = Some(GradientFill {
+            gradient_type: 2,
+            angle: 90,
+            center_x: 50,
+            center_y: 50,
+            blur: 40,
+            colors: vec![0x00CC8844, 0x00112233],
+            positions: Vec::new(),
+        });
+        doc.doc_info.border_fills.push(bf);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rt = &parsed.doc_info.border_fills[0];
+        assert_eq!(rt.fill.fill_type, FillType::Gradient, "gradient fill type must survive");
+        let grad = rt.fill.gradient.as_ref().expect("gradation must be parsed back");
+        assert_eq!(grad.gradient_type, 2);
+        assert_eq!(grad.angle, 90);
+        assert_eq!(grad.center_x, 50);
+        assert_eq!(grad.center_y, 50);
+        assert_eq!(grad.blur, 40);
+        assert_eq!(
+            grad.colors,
+            vec![0x00CC8844, 0x00112233],
+            "gradation <hc:color> children must roundtrip in order"
+        );
+    }
+
+    #[test]
+    fn border_fill_image_fill_roundtrips() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::style::{ImageFill, ImageFillMode};
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: vec![0u8; 4],
+            extension: "png".to_string(),
+        });
+        let mut bf = BorderFill::default();
+        bf.fill.fill_type = FillType::Image;
+        bf.fill.image = Some(ImageFill {
+            fill_mode: ImageFillMode::FitToSize,
+            brightness: 5,
+            contrast: -3,
+            effect: 0,
+            bin_data_id: 1,
+        });
+        doc.doc_info.border_fills.push(bf);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rt = &parsed.doc_info.border_fills[0];
+        assert_eq!(rt.fill.fill_type, FillType::Image, "image fill type must survive");
+        let img = rt.fill.image.as_ref().expect("imgBrush must be parsed back");
+        assert_eq!(img.fill_mode, ImageFillMode::FitToSize, "mode must roundtrip");
+        assert_eq!(img.brightness, 5);
+        assert_eq!(img.contrast, -3);
+        assert_eq!(img.bin_data_id, 1, "binaryItemIDRef must resolve back to bin_data_id");
+    }
+
+    #[test]
+    fn border_fill_image_fill_without_bin_data_omits_img_child() {
+        use crate::model::style::{ImageFill, ImageFillMode};
+
+        // ctx 에 등록되지 않은 bin_data_id 참조 → panic/Err 없이 img 자식만 생략
+        let mut doc = Document::default();
+        let mut bf = BorderFill::default();
+        bf.fill.fill_type = FillType::Image;
+        bf.fill.image = Some(ImageFill {
+            fill_mode: ImageFillMode::TileAll,
+            brightness: 0,
+            contrast: 0,
+            effect: 0,
+            bin_data_id: 99, // 미등록
+        });
+        doc.doc_info.border_fills.push(bf);
+
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_header(&doc, &ctx).expect("write_header must not fail");
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        assert!(xml.contains("<hc:imgBrush "), "imgBrush must still be emitted: {}", xml);
+        assert!(
+            !xml.contains("binaryItemIDRef"),
+            "unresolvable bin_data_id must omit <hc:img> child: {}",
+            xml
+        );
     }
 
     #[test]

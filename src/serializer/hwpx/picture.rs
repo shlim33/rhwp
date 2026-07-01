@@ -28,7 +28,9 @@ use std::io::Write;
 use quick_xml::Writer;
 
 use crate::model::image::{ImageEffect, Picture};
-use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo};
+use crate::model::shape::{
+    CommonObjAttr, HorzAlign, HorzRelTo, ShapeComponentAttr, TextWrap, VertAlign, VertRelTo,
+};
 
 use super::context::SerializeContext;
 use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
@@ -72,11 +74,11 @@ pub fn write_picture<W: Write>(
     // offset, orgSz, curSz, flip, rotationInfo, renderingInfo, imgRect, imgClip,
     // inMargin, imgDim, img, effects, sz, pos, outMargin
     write_offset(w, &pic.common)?;
-    write_org_sz(w)?; // ShapeComponentAttr 매핑 (IR 접근 제한으로 간이)
+    write_org_sz(w, &pic.shape_attr)?;
     write_cur_sz(w, &pic.common)?;
-    write_flip(w)?;
-    write_rotation_info(w)?;
-    write_rendering_info(w)?;
+    write_flip(w, &pic.shape_attr)?;
+    write_rotation_info(w, &pic.shape_attr)?;
+    write_rendering_info(w, &pic.shape_attr)?;
     write_img_rect(w, &pic.common)?;
     write_img_clip(w, pic)?;
     write_in_margin(w, pic)?;
@@ -99,11 +101,14 @@ fn write_offset<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Se
     empty_tag(w, "hp:offset", &[("x", &x), ("y", &y)])
 }
 
-fn write_org_sz<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
-    // IR에서 원본 크기는 shape_attr.original_width/height 이나 접근이 제한적.
-    // Stage 4 에선 common.width/height 를 그대로 원본 크기로 출력 (간이).
-    // Picture 라운드트립 실제 정확도는 shape_attr 직접 매핑 후 향상됨.
-    empty_tag(w, "hp:orgSz", &[("width", "0"), ("height", "0")])
+fn write_org_sz<W: Write>(
+    w: &mut Writer<W>,
+    sa: &ShapeComponentAttr,
+) -> Result<(), SerializeError> {
+    // 원본 크기: parser 가 orgSz → shape_attr.original_width/height 로 되읽는 필드.
+    let width = sa.original_width.to_string();
+    let height = sa.original_height.to_string();
+    empty_tag(w, "hp:orgSz", &[("width", &width), ("height", &height)])
 }
 
 fn write_cur_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), SerializeError> {
@@ -112,39 +117,79 @@ fn write_cur_sz<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<(), Se
     empty_tag(w, "hp:curSz", &[("width", &width), ("height", &height)])
 }
 
-fn write_flip<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
-    empty_tag(w, "hp:flip", &[("horizontal", "0"), ("vertical", "0")])
-}
-
-fn write_rotation_info<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
+fn write_flip<W: Write>(
+    w: &mut Writer<W>,
+    sa: &ShapeComponentAttr,
+) -> Result<(), SerializeError> {
     empty_tag(
         w,
-        "hp:rotationInfo",
-        &[("angle", "0"), ("centerX", "0"), ("centerY", "0"), ("rotateimage", "0")],
+        "hp:flip",
+        &[
+            ("horizontal", bool01(sa.horz_flip)),
+            ("vertical", bool01(sa.vert_flip)),
+        ],
     )
 }
 
-fn write_rendering_info<W: Write>(w: &mut Writer<W>) -> Result<(), SerializeError> {
-    // 3개 행렬 (transMatrix / scaMatrix / rotMatrix) 을 identity 로 출력.
+fn write_rotation_info<W: Write>(
+    w: &mut Writer<W>,
+    sa: &ShapeComponentAttr,
+) -> Result<(), SerializeError> {
+    let angle = sa.rotation_angle.to_string();
+    let cx = sa.rotation_center.x.to_string();
+    let cy = sa.rotation_center.y.to_string();
+    empty_tag(
+        w,
+        "hp:rotationInfo",
+        &[
+            ("angle", &angle),
+            ("centerX", &cx),
+            ("centerY", &cy),
+            ("rotateimage", "0"),
+        ],
+    )
+}
+
+/// `<hp:renderingInfo>` — IR 은 trans/sca/rot 개별 행렬이 아니라 합성 아핀
+/// [a,b,tx,c,d,ty] (`shape_attr.render_*`) 만 저장한다 (IR 한계).
+/// parser 의 합성식 `result = trans × rot × sca` (parse_rendering_info) 에 맞춰
+/// trans=[1,0,tx,0,1,ty] / sca=identity / rot=[a,b,0,c,d,0] 로 분해해 내보내면
+/// 재파싱 시 render_* 가 손실 없이 복원된다. 변환 없음(기본값)이면 3개 모두 identity
+/// 로 출력되어 기존 동작과 동일하다.
+fn write_rendering_info<W: Write>(
+    w: &mut Writer<W>,
+    sa: &ShapeComponentAttr,
+) -> Result<(), SerializeError> {
     start_tag(w, "hp:renderingInfo")?;
-    write_matrix(w, "hc:transMatrix")?;
-    write_matrix(w, "hc:scaMatrix")?;
-    write_matrix(w, "hc:rotMatrix")?;
+    write_matrix(w, "hc:transMatrix", [1.0, 0.0, sa.render_tx, 0.0, 1.0, sa.render_ty])?;
+    write_matrix(w, "hc:scaMatrix", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])?;
+    write_matrix(
+        w,
+        "hc:rotMatrix",
+        [sa.render_sx, sa.render_b, 0.0, sa.render_c, sa.render_sy, 0.0],
+    )?;
     end_tag(w, "hp:renderingInfo")?;
     Ok(())
 }
 
-fn write_matrix<W: Write>(w: &mut Writer<W>, name: &str) -> Result<(), SerializeError> {
+fn write_matrix<W: Write>(
+    w: &mut Writer<W>,
+    name: &str,
+    m: [f64; 6],
+) -> Result<(), SerializeError> {
+    // f64 Display 는 최단 round-trip 표기 (1.0 → "1", 0.0 → "0") 이므로
+    // parser 의 `parse::<f64>()` 가 동일 값으로 복원한다.
+    let e: Vec<String> = m.iter().map(|v| v.to_string()).collect();
     empty_tag(
         w,
         name,
         &[
-            ("e1", "1"),
-            ("e2", "0"),
-            ("e3", "0"),
-            ("e4", "0"),
-            ("e5", "1"),
-            ("e6", "0"),
+            ("e1", &e[0]),
+            ("e2", &e[1]),
+            ("e3", &e[2]),
+            ("e4", &e[3]),
+            ("e5", &e[4]),
+            ("e6", &e[5]),
         ],
     )
 }
@@ -218,6 +263,8 @@ fn write_img<W: Write>(
             ("bright", &bright),
             ("contrast", &contrast),
             ("effect", effect),
+            // IR(ImageAttr) 에 이미지 알파/투명도 필드가 없고 parser 도 읽지 않는다
+            // (IR 한계) — 한컴 기본값 0 고정.
             ("alpha", "0"),
         ],
     )
@@ -454,6 +501,99 @@ mod tests {
         assert!(xml.contains("<hc:pt1 "));
         assert!(xml.contains("<hc:pt2 "));
         assert!(xml.contains("<hc:pt3 "));
+    }
+
+    // ---------------------------------------------------------------
+    // 그림 변환(원본 크기/뒤집기/회전/렌더링 행렬) 라운드트립
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn picture_transform_roundtrips_through_hwpx() {
+        use crate::model::control::Control;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = make_doc_with_bin(1, "png");
+        let mut pic = make_picture(1);
+        pic.common.width = 2000;
+        pic.common.height = 1500;
+        pic.shape_attr.original_width = 4000;
+        pic.shape_attr.original_height = 3000;
+        pic.shape_attr.horz_flip = true;
+        pic.shape_attr.vert_flip = false;
+        pic.shape_attr.rotation_angle = 45;
+        pic.shape_attr.rotation_center.x = 2000;
+        pic.shape_attr.rotation_center.y = 1500;
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "AB".to_string();
+        para.char_offsets = vec![0, 9];
+        para.char_count = 11;
+        para.controls.push(Control::Picture(Box::new(pic)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rt = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("picture must survive roundtrip");
+        assert_eq!(rt.shape_attr.original_width, 4000, "orgSz width must roundtrip");
+        assert_eq!(rt.shape_attr.original_height, 3000, "orgSz height must roundtrip");
+        assert!(rt.shape_attr.horz_flip, "horizontal flip must roundtrip");
+        assert!(!rt.shape_attr.vert_flip, "vertical flip must stay off");
+        assert_eq!(rt.shape_attr.rotation_angle, 45, "rotation angle must roundtrip");
+        assert_eq!(rt.shape_attr.rotation_center.x, 2000, "rotation centerX must roundtrip");
+        assert_eq!(rt.shape_attr.rotation_center.y, 1500, "rotation centerY must roundtrip");
+    }
+
+    #[test]
+    fn picture_rendering_matrix_roundtrips_through_hwpx() {
+        use crate::model::control::Control;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = make_doc_with_bin(1, "png");
+        let mut pic = make_picture(1);
+        // IR은 합성 아핀 행렬 [a,b,tx,c,d,ty] 를 저장한다 (render_*).
+        pic.shape_attr.render_sx = 0.866;
+        pic.shape_attr.render_b = -0.5;
+        pic.shape_attr.render_c = 0.5;
+        pic.shape_attr.render_sy = 0.866;
+        pic.shape_attr.render_tx = 10.5;
+        pic.shape_attr.render_ty = -3.25;
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "AB".to_string();
+        para.char_offsets = vec![0, 9];
+        para.char_count = 11;
+        para.controls.push(Control::Picture(Box::new(pic)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rt = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("picture must survive roundtrip");
+        assert_eq!(rt.shape_attr.render_sx, 0.866, "render_sx must roundtrip");
+        assert_eq!(rt.shape_attr.render_b, -0.5, "render_b must roundtrip");
+        assert_eq!(rt.shape_attr.render_c, 0.5, "render_c must roundtrip");
+        assert_eq!(rt.shape_attr.render_sy, 0.866, "render_sy must roundtrip");
+        assert_eq!(rt.shape_attr.render_tx, 10.5, "render_tx must roundtrip");
+        assert_eq!(rt.shape_attr.render_ty, -3.25, "render_ty must roundtrip");
     }
 
     #[test]
