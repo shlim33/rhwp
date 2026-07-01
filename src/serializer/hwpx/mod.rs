@@ -874,6 +874,81 @@ mod tests {
         );
     }
 
+    /// hwpx-h-01.hwpx 원본은 section0 에 `<hp:pic>` 5개를 담고 있다
+    /// (표 셀 내부 2 + `<hp:container>` 묶음 개체 내부 3).
+    /// exportHwpx 가 container 자식을 드랍하지 않고 전부 재-직렬화하는지,
+    /// parse-back 시 container 자체와 그 안의 그림들이 IR 로 복원되는지 검증한다.
+    #[test]
+    fn hwpx_h_sample_container_pictures_survive_export() {
+        use crate::model::control::Control;
+        use crate::model::document::Document;
+        use crate::model::shape::ShapeObject;
+
+        let bytes = std::fs::read("samples/hwpx/hwpx-h-01.hwpx")
+            .expect("samples/hwpx/hwpx-h-01.hwpx must be readable");
+        let original = parse_hwpx(&bytes).expect("parse original");
+
+        // (containers, pics inside containers) — 중첩 그룹까지 재귀 집계
+        fn count_container_pics(doc: &Document) -> (usize, usize) {
+            fn walk_shape(shape: &ShapeObject, containers: &mut usize, pics: &mut usize) {
+                if let ShapeObject::Group(g) = shape {
+                    *containers += 1;
+                    for ch in &g.children {
+                        if matches!(ch, ShapeObject::Picture(_)) {
+                            *pics += 1;
+                        }
+                        walk_shape(ch, containers, pics);
+                    }
+                }
+            }
+            let mut containers = 0usize;
+            let mut pics = 0usize;
+            for sec in &doc.sections {
+                for para in &sec.paragraphs {
+                    for ctrl in &para.controls {
+                        if let Control::Shape(shape) = ctrl {
+                            walk_shape(shape, &mut containers, &mut pics);
+                        }
+                    }
+                }
+            }
+            (containers, pics)
+        }
+
+        let (orig_containers, orig_container_pics) = count_container_pics(&original);
+        assert_eq!(
+            (orig_containers, orig_container_pics),
+            (1, 3),
+            "original IR container census"
+        );
+
+        let out = serialize_hwpx(&original).expect("re-serialize");
+        let cursor = std::io::Cursor::new(&out);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        drop(sec0);
+
+        let pic_count = xml.matches("<hp:pic ").count();
+        assert!(
+            pic_count >= 5,
+            "exported section0 must keep all 5 <hp:pic> (was 2 before container children fix), got {}",
+            pic_count
+        );
+
+        let reparsed = parse_hwpx(&out).expect("parse back");
+        let (re_containers, re_pics) = count_container_pics(&reparsed);
+        assert_eq!(
+            re_containers, orig_containers,
+            "container count must survive export+reparse"
+        );
+        assert_eq!(
+            re_pics, orig_container_pics,
+            "container pictures must survive export+reparse"
+        );
+    }
+
     /// tac-img-02.hwpx 파싱 후 BinData 가 존재하는지, Picture 컨트롤이
     /// section XML 에 반영되는지 확인하는 스모크 테스트.
     /// 실문서는 borderFillIDRef 가 복잡하여 full roundtrip 대신 직렬화 단계만 검증.

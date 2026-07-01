@@ -428,13 +428,32 @@ fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
             Err(e) => { eprintln!("[hwpx] Shape::Line 직렬화 실패: {e}"); String::new() }
         };
     }
+    // Group (묶음 개체): <hp:container> 껍데기 + 자식 개체를 재귀 직렬화.
+    // 자식은 파서(parse_container)가 되읽는 것과 동일하게 각자의 per-kind writer
+    // (write_picture / write_rect / write_line / render_common_shape_xml)로 출력한다.
+    if let ShapeObject::Group(g) = shape {
+        let children_xml: String = g
+            .children
+            .iter()
+            .map(|child| render_shape(child, ctx))
+            .collect();
+        return match writer_to_string(|w| {
+            super::shape::write_container_open(w, &g.common)?;
+            super::utils::write_raw(w, &children_xml)?;
+            super::shape::write_container_close(w)
+        }) {
+            Ok(xml) => xml,
+            Err(e) => { eprintln!("[hwpx] Shape::Group 직렬화 실패: {e}"); String::new() }
+        };
+    }
     let (tag, c) = match shape {
-        ShapeObject::Rectangle(_) | ShapeObject::Line(_) => unreachable!(),
+        ShapeObject::Rectangle(_) | ShapeObject::Line(_) | ShapeObject::Group(_) => {
+            unreachable!()
+        }
         ShapeObject::Ellipse(e) => ("ellipse", &e.common),
         ShapeObject::Arc(a) => ("arc", &a.common),
         ShapeObject::Polygon(p) => ("polygon", &p.common),
         ShapeObject::Curve(cv) => ("curve", &cv.common),
-        ShapeObject::Group(g) => ("container", &g.common),
         ShapeObject::Picture(pic) => {
             return match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
                 Ok(xml) => xml,

@@ -555,4 +555,207 @@ mod tests {
             "drawText picture must keep its bin_data reference"
         );
     }
+
+    // ---------------------------------------------------------------
+    // container (묶음 개체) 자식 라운드트립 — exportHwpx fidelity
+    // ---------------------------------------------------------------
+
+    /// 라운드트립 테스트용 Document 뼈대 + 그룹 컨트롤 1개를 담은 문서 생성.
+    fn doc_with_group(
+        group: crate::model::shape::GroupShape,
+        bin_ids: &[u16],
+    ) -> crate::model::document::Document {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Control;
+        use crate::model::document::Document;
+        use crate::model::shape::ShapeObject;
+
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        for &id in bin_ids {
+            doc.bin_data_content.push(BinDataContent {
+                id,
+                data: format!("\u{89}PNG_fake_container_image_{id}").into_bytes(),
+                extension: "png".to_string(),
+            });
+        }
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls
+            .push(Control::Shape(Box::new(ShapeObject::Group(group))));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+        doc
+    }
+
+    /// 파싱된 문서의 첫 문단 controls 에서 GroupShape 를 찾아 반환.
+    fn find_group(
+        doc: &crate::model::document::Document,
+    ) -> &crate::model::shape::GroupShape {
+        use crate::model::control::Control;
+        use crate::model::shape::ShapeObject;
+        doc.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Shape(s) => match s.as_ref() {
+                    ShapeObject::Group(g) => Some(g),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("container (GroupShape) must survive roundtrip")
+    }
+
+    fn make_child_picture(
+        bin_data_id: u16,
+        width: u32,
+        height: u32,
+        horz_offset: u32,
+        vert_offset: u32,
+    ) -> crate::model::image::Picture {
+        use crate::model::image::{ImageAttr, Picture};
+        Picture {
+            common: CommonObjAttr {
+                width,
+                height,
+                horizontal_offset: horz_offset,
+                vertical_offset: vert_offset,
+                ..Default::default()
+            },
+            image_attr: ImageAttr {
+                bin_data_id,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// 묶음 개체(container) 안의 그림 2개가 (서로 다른 오프셋으로)
+    /// serialize → parse 라운드트립에서 bin_data 참조·크기·오프셋까지 보존돼야 한다.
+    #[test]
+    fn container_with_two_pictures_roundtrips_through_hwpx() {
+        use crate::model::shape::{GroupShape, ShapeObject};
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let group = GroupShape {
+            common: CommonObjAttr {
+                width: 20000,
+                height: 10000,
+                ..Default::default()
+            },
+            children: vec![
+                ShapeObject::Picture(Box::new(make_child_picture(1, 5000, 3000, 100, 200))),
+                ShapeObject::Picture(Box::new(make_child_picture(2, 7000, 4000, 6000, 1500))),
+            ],
+            ..Default::default()
+        };
+        let doc = doc_with_group(group, &[1, 2]);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let group = find_group(&parsed);
+
+        assert_eq!(
+            group.common.width, 20000,
+            "container sz must survive roundtrip"
+        );
+        assert_eq!(
+            group.children.len(),
+            2,
+            "container must keep both picture children, got {:?}",
+            group.children.len()
+        );
+        let pics: Vec<_> = group
+            .children
+            .iter()
+            .filter_map(|ch| match ch {
+                ShapeObject::Picture(p) => Some(p.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pics.len(), 2, "both children must be pictures");
+        let p1 = pics
+            .iter()
+            .find(|p| p.image_attr.bin_data_id == 1)
+            .expect("picture with bin_data 1 must survive");
+        let p2 = pics
+            .iter()
+            .find(|p| p.image_attr.bin_data_id == 2)
+            .expect("picture with bin_data 2 must survive");
+        assert_eq!((p1.common.width, p1.common.height), (5000, 3000));
+        assert_eq!((p2.common.width, p2.common.height), (7000, 4000));
+        assert_eq!(
+            (p1.common.horizontal_offset, p1.common.vertical_offset),
+            (100, 200),
+            "child picture offsets must survive"
+        );
+        assert_eq!(
+            (p2.common.horizontal_offset, p2.common.vertical_offset),
+            (6000, 1500),
+            "child picture offsets must survive"
+        );
+    }
+
+    /// 묶음 개체 안에 그림 + 사각형이 섞여 있어도 두 자식 모두 보존돼야 한다.
+    #[test]
+    fn container_with_picture_and_rect_roundtrips_through_hwpx() {
+        use crate::model::shape::{GroupShape, ShapeObject};
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut rect = RectangleShape::default();
+        rect.common.width = 4000;
+        rect.common.height = 2000;
+
+        let group = GroupShape {
+            common: CommonObjAttr {
+                width: 15000,
+                height: 8000,
+                ..Default::default()
+            },
+            children: vec![
+                ShapeObject::Picture(Box::new(make_child_picture(1, 5000, 3000, 0, 0))),
+                ShapeObject::Rectangle(rect),
+            ],
+            ..Default::default()
+        };
+        let doc = doc_with_group(group, &[1]);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let group = find_group(&parsed);
+
+        assert_eq!(
+            group.children.len(),
+            2,
+            "container must keep picture + rect children"
+        );
+        let pic = group
+            .children
+            .iter()
+            .find_map(|ch| match ch {
+                ShapeObject::Picture(p) => Some(p.as_ref()),
+                _ => None,
+            })
+            .expect("picture child must survive");
+        assert_eq!(pic.image_attr.bin_data_id, 1);
+        assert_eq!((pic.common.width, pic.common.height), (5000, 3000));
+        let rect = group
+            .children
+            .iter()
+            .find_map(|ch| match ch {
+                ShapeObject::Rectangle(r) => Some(r),
+                _ => None,
+            })
+            .expect("rect child must survive");
+        assert_eq!((rect.common.width, rect.common.height), (4000, 2000));
+    }
 }
