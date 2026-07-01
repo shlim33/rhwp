@@ -65,6 +65,15 @@ pub fn text<W: Write>(w: &mut Writer<W>, content: &str) -> Result<(), SerializeE
     Ok(())
 }
 
+/// 이미 escape 완료된 XML 조각(String 기반 writer 출력)을 Writer 에 그대로 주입한다.
+/// section.rs `render_run_content` 처럼 String 을 생산하는 경로와 quick_xml Writer
+/// 기반 경로(table.rs/shape.rs)를 잇는 브리지.
+pub fn write_raw<W: Write>(w: &mut Writer<W>, xml: &str) -> Result<(), SerializeError> {
+    w.get_mut()
+        .write_all(xml.as_bytes())
+        .map_err(|e| SerializeError::XmlError(format!("raw write: {e}")))
+}
+
 /// XML 속성·텍스트 이스케이프 (&, <, >, ", ')
 pub fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

@@ -261,7 +261,10 @@ fn render_hp_t_content(text: &str) -> String {
 }
 
 /// Paragraph의 본문 run 콘텐츠를 `<hp:t>`와 인라인 컨트롤 XML로 직렬화한다.
-fn render_run_content(para: &Paragraph, ctx: &mut SerializeContext) -> String {
+///
+/// 본문뿐 아니라 셀 문단(table.rs)·글상자 문단(shape.rs)도 이 함수를 공유하여
+/// `para.controls` (그림/중첩 표/수식 등)를 char-offset 슬롯 위치에 emit 한다.
+pub(super) fn render_run_content(para: &Paragraph, ctx: &mut SerializeContext) -> String {
     let slot_count = inferred_control_slot_count(para);
     let slots: Vec<&Control> = if slot_count == para.controls.len() {
         para.controls.iter().collect()
@@ -345,7 +348,7 @@ fn inferred_control_slot_count(para: &Paragraph) -> usize {
     from_char_count.max(from_offsets) as usize
 }
 
-fn is_hwpx_inline_slot(control: &Control) -> bool {
+pub(super) fn is_hwpx_inline_slot(control: &Control) -> bool {
     matches!(
         control,
         Control::Table(_)
@@ -410,10 +413,10 @@ where
     })
 }
 
-fn render_shape(shape: &ShapeObject, ctx: &SerializeContext) -> String {
+fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
     // Rectangle: Writer-based serializer (drawText 포함)
     if let ShapeObject::Rectangle(r) = shape {
-        return match writer_to_string(|w| super::shape::write_rect(w, r)) {
+        return match writer_to_string(|w| super::shape::write_rect(w, r, ctx)) {
             Ok(xml) => xml,
             Err(e) => { eprintln!("[hwpx] Shape::Rectangle 직렬화 실패: {e}"); String::new() }
         };

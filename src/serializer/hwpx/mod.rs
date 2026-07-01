@@ -785,6 +785,95 @@ mod tests {
         );
     }
 
+    /// tac-img-02.hwpx 원본은 section0 에 `<hp:pic>` 18개를 담고 있다
+    /// (본문 직속 6 + 표 셀 내부 9 + rect drawText 내부 3).
+    /// exportHwpx 가 셀/글상자 내부 컨트롤을 드랍하지 않고 전부 재-직렬화하는지,
+    /// parse-back 시 셀 그림·글상자 그림이 IR 로 복원되는지 검증한다.
+    #[test]
+    fn tac_img_sample_nested_pictures_survive_export() {
+        use crate::model::control::Control;
+        use crate::model::document::Document;
+        use crate::model::shape::ShapeObject;
+
+        let bytes = std::fs::read("samples/tac-img-02.hwpx")
+            .expect("samples/tac-img-02.hwpx must be readable");
+        let original = parse_hwpx(&bytes).expect("parse original");
+
+        let out = serialize_hwpx(&original).expect("re-serialize");
+        let cursor = std::io::Cursor::new(&out);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        drop(sec0);
+
+        let pic_count = xml.matches("<hp:pic ").count();
+        assert!(
+            pic_count >= 18,
+            "exported section0 must keep all 18 <hp:pic> (was 6 before cell/drawText fix), got {}",
+            pic_count
+        );
+
+        // parse-back: 셀 내부·글상자 내부 그림이 IR 로 복원되는지
+        fn count_nested_pics(doc: &Document) -> (usize, usize) {
+            let mut cell_pics = 0usize;
+            let mut draw_text_pics = 0usize;
+            fn walk(ctrl: &Control, cell_pics: &mut usize, draw_text_pics: &mut usize) {
+                match ctrl {
+                    Control::Table(tbl) => {
+                        for cell in &tbl.cells {
+                            for para in &cell.paragraphs {
+                                for c in &para.controls {
+                                    if matches!(c, Control::Picture(_)) {
+                                        *cell_pics += 1;
+                                    }
+                                    walk(c, cell_pics, draw_text_pics);
+                                }
+                            }
+                        }
+                    }
+                    Control::Shape(shape) => {
+                        if let ShapeObject::Rectangle(r) = shape.as_ref() {
+                            if let Some(tb) = &r.drawing.text_box {
+                                for para in &tb.paragraphs {
+                                    for c in &para.controls {
+                                        if matches!(c, Control::Picture(_)) {
+                                            *draw_text_pics += 1;
+                                        }
+                                        walk(c, cell_pics, draw_text_pics);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for sec in &doc.sections {
+                for para in &sec.paragraphs {
+                    for ctrl in &para.controls {
+                        walk(ctrl, &mut cell_pics, &mut draw_text_pics);
+                    }
+                }
+            }
+            (cell_pics, draw_text_pics)
+        }
+
+        let (orig_cell, orig_dt) = count_nested_pics(&original);
+        assert_eq!((orig_cell, orig_dt), (9, 3), "original IR nested pic census");
+
+        let reparsed = parse_hwpx(&out).expect("parse back");
+        let (re_cell, re_dt) = count_nested_pics(&reparsed);
+        assert_eq!(
+            re_cell, orig_cell,
+            "cell pictures must survive export+reparse"
+        );
+        assert_eq!(
+            re_dt, orig_dt,
+            "drawText pictures must survive export+reparse"
+        );
+    }
+
     /// tac-img-02.hwpx 파싱 후 BinData 가 존재하는지, Picture 컨트롤이
     /// section XML 에 반영되는지 확인하는 스모크 테스트.
     /// 실문서는 borderFillIDRef 가 복잡하여 full roundtrip 대신 직렬화 단계만 검증.

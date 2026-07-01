@@ -33,7 +33,7 @@ use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo, HorzAli
 use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
 
 use super::context::SerializeContext;
-use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
+use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs, write_raw};
 use super::SerializeError;
 
 /// `<hp:tbl>` 직렬화.
@@ -299,8 +299,21 @@ fn write_sub_list<W: Write>(
             ],
         )?;
 
-        // 셀 단락도 char_shape 스팬별로 run 분할 (셀 안 텍스트 부분 서식 보존).
-        write_cell_paragraph_runs(w, para)?;
+        // 셀 단락 콘텐츠:
+        // - 인라인 컨트롤(그림/중첩 표/수식 등)이 있으면 본문과 동일한 controls-aware
+        //   공유 writer (section.rs render_run_content) 로 char-offset 슬롯에 emit.
+        //   (본문 write_section 과 동형: 컨트롤 문단은 단일 run 으로 감싼다.)
+        // - 없으면 기존 char_shape 스팬별 run 분할 (셀 안 텍스트 부분 서식 보존).
+        if para.controls.iter().any(super::section::is_hwpx_inline_slot) {
+            let cs = para.char_shapes.first().map(|r| r.char_shape_id).unwrap_or(0);
+            let cs_str = cs.to_string();
+            let content = super::section::render_run_content(para, ctx);
+            start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
+            write_raw(w, &content)?;
+            end_tag(w, "hp:run")?;
+        } else {
+            write_cell_paragraph_runs(w, para)?;
+        }
 
         // <hp:linesegarray> 최소 1개 lineseg
         start_tag(w, "hp:linesegarray")?;
@@ -726,6 +739,166 @@ mod tests {
             "zone addrs must roundtrip"
         );
         assert_eq!(z.border_fill_id, 2, "zone borderFillIDRef must roundtrip");
+    }
+
+    // ---------------------------------------------------------------
+    // 셀 내부 컨트롤 (그림/중첩 표) 라운드트립 — exportHwpx fidelity
+    // ---------------------------------------------------------------
+
+    /// 셀 문단이 참조하는 para_shape/style/char_shape/borderFill 0 을 등록한 Document.
+    fn doc_with_common_refs() -> Document {
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        doc.doc_info.border_fills.push(crate::model::style::BorderFill::default());
+        doc
+    }
+
+    /// 표를 담은 본문 문단 (컨트롤 슬롯 1개: char_offsets 갭 8).
+    fn host_paragraph_with(control: crate::model::control::Control) -> Paragraph {
+        let mut para = Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls.push(control);
+        para
+    }
+
+    #[test]
+    fn cell_picture_roundtrips_through_hwpx() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Control;
+        use crate::model::image::{ImageAttr, Picture};
+        use crate::model::shape::CommonObjAttr;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let fake_png = b"\x89PNG\r\n\x1a\nfake_cell_image";
+        let mut doc = doc_with_common_refs();
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: fake_png.to_vec(),
+            extension: "png".to_string(),
+        });
+
+        let mut t = empty_table(1, 1);
+        {
+            let cell_para = &mut t.cells[0].paragraphs[0];
+            cell_para.text = "A".to_string();
+            cell_para.char_offsets = vec![8]; // 그림 슬롯(8 유닛) 뒤에 'A'
+            cell_para.char_count = 10;
+            cell_para.controls.push(Control::Picture(Box::new(Picture {
+                common: CommonObjAttr {
+                    width: 5000,
+                    height: 3000,
+                    treat_as_char: true,
+                    ..Default::default()
+                },
+                image_attr: ImageAttr {
+                    bin_data_id: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })));
+        }
+
+        let mut section = crate::model::document::Section::default();
+        section
+            .paragraphs
+            .push(host_paragraph_with(Control::Table(Box::new(t))));
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let tbl = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table must survive roundtrip");
+        let cell_para = &tbl.cells[0].paragraphs[0];
+        assert!(
+            cell_para.text.contains('A'),
+            "cell text must survive: {:?}",
+            cell_para.text
+        );
+        let pic = cell_para
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("picture inside table cell must survive hwpx roundtrip");
+        assert_eq!(
+            pic.image_attr.bin_data_id, 1,
+            "cell picture must keep its bin_data reference"
+        );
+        assert_eq!(
+            parsed.bin_data_content[0].data, fake_png,
+            "picture binary must survive"
+        );
+    }
+
+    #[test]
+    fn nested_table_in_cell_roundtrips_through_hwpx() {
+        use crate::model::control::Control;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = doc_with_common_refs();
+
+        let mut inner = empty_table(2, 3);
+        inner.cells[0].paragraphs[0].text = "X".to_string();
+
+        let mut outer = empty_table(1, 1);
+        {
+            let cell_para = &mut outer.cells[0].paragraphs[0];
+            cell_para.text = String::new();
+            cell_para.char_offsets = vec![];
+            cell_para.char_count = 9; // 슬롯 1개(8 유닛) + 끝 마커
+            cell_para.controls.push(Control::Table(Box::new(inner)));
+        }
+
+        let mut section = crate::model::document::Section::default();
+        section
+            .paragraphs
+            .push(host_paragraph_with(Control::Table(Box::new(outer))));
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let outer_tbl = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("outer table must survive roundtrip");
+        let inner_tbl = outer_tbl.cells[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("nested table inside cell must survive hwpx roundtrip");
+        assert_eq!(inner_tbl.row_count, 2, "nested row_count must roundtrip");
+        assert_eq!(inner_tbl.col_count, 3, "nested col_count must roundtrip");
+        let inner_cell = inner_tbl
+            .cells
+            .iter()
+            .find(|c| c.row == 0 && c.col == 0)
+            .expect("nested cell (0,0)");
+        assert!(
+            inner_cell.paragraphs[0].text.contains('X'),
+            "nested cell text must roundtrip: {:?}",
+            inner_cell.paragraphs[0].text
+        );
     }
 
     #[test]

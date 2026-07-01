@@ -23,7 +23,8 @@ use crate::model::shape::{
     VertAlign, VertRelTo,
 };
 
-use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
+use super::context::SerializeContext;
+use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs, write_raw};
 use super::SerializeError;
 
 // =====================================================================
@@ -31,7 +32,12 @@ use super::SerializeError;
 // =====================================================================
 
 /// `<hp:rect>` 직렬화 진입점. Rectangle IR → XML.
-pub fn write_rect<W: Write>(w: &mut Writer<W>, rect: &RectangleShape) -> Result<(), SerializeError> {
+/// `ctx` 는 drawText 문단 내 인라인 컨트롤(그림/중첩 표 등) 직렬화에 사용.
+pub fn write_rect<W: Write>(
+    w: &mut Writer<W>,
+    rect: &RectangleShape,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
     let c = &rect.common;
     // 속성 (부모 AbstractShapeObjectType + 자신):
     // id, zOrder, numberingType, textWrap, textFlow, lock, dropcapstyle,
@@ -66,7 +72,7 @@ pub fn write_rect<W: Write>(w: &mut Writer<W>, rect: &RectangleShape) -> Result<
     // drawText: 글상자 내부 문단
     if let Some(ref tb) = rect.drawing.text_box {
         if !tb.paragraphs.is_empty() {
-            write_draw_text(w, tb)?;
+            write_draw_text(w, tb, ctx)?;
         }
     }
 
@@ -169,6 +175,7 @@ pub fn write_container_close<W: Write>(w: &mut Writer<W>) -> Result<(), Serializ
 pub fn write_draw_text<W: Write>(
     w: &mut Writer<W>,
     tb: &TextBox,
+    ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
     let ml = tb.margin_left.to_string();
     let mr = tb.margin_right.to_string();
@@ -206,7 +213,7 @@ pub fn write_draw_text<W: Write>(
     )?;
 
     for (idx, p) in tb.paragraphs.iter().enumerate() {
-        write_draw_text_paragraph(w, p, idx)?;
+        write_draw_text_paragraph(w, p, idx, ctx)?;
     }
 
     end_tag(w, "hp:subList")?;
@@ -218,6 +225,7 @@ fn write_draw_text_paragraph<W: Write>(
     w: &mut Writer<W>,
     p: &Paragraph,
     idx: usize,
+    ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
     let id = idx.to_string();
     let ps_id = p.para_shape_id.to_string();
@@ -240,12 +248,10 @@ fn write_draw_text_paragraph<W: Write>(
     let cs_str = cs.to_string();
     start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
 
-    // simple text output — XML escape
-    start_tag(w, "hp:t")?;
-    w.write_event(quick_xml::events::Event::Text(
-        quick_xml::events::BytesText::new(&super::utils::xml_escape(&p.text)),
-    )).map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
-    end_tag(w, "hp:t")?;
+    // 본문과 동일한 controls-aware 공유 writer — 텍스트(<hp:t>, escape 포함)와
+    // 인라인 컨트롤(그림 등)을 char-offset 슬롯 위치에 emit 한다.
+    let content = super::section::render_run_content(p, ctx);
+    write_raw(w, &content)?;
 
     end_tag(w, "hp:run")?;
 
@@ -391,8 +397,10 @@ mod tests {
     use crate::model::shape::{RectangleShape, LineShape};
 
     fn serialize_rect(rect: &RectangleShape) -> String {
+        let doc = crate::model::document::Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
-        write_rect(&mut w, rect).expect("write_rect");
+        write_rect(&mut w, rect, &mut ctx).expect("write_rect");
         String::from_utf8(w.into_inner()).unwrap()
     }
 
@@ -441,5 +449,110 @@ mod tests {
         assert!(xml.contains("<hp:sz "));
         assert!(xml.contains("<hp:pos "));
         assert!(xml.contains("<hp:outMargin "));
+    }
+
+    // ---------------------------------------------------------------
+    // drawText (글상자) 콘텐츠 라운드트립 — exportHwpx fidelity
+    // ---------------------------------------------------------------
+
+    /// 사각형 글상자에 텍스트 문단("제목") + 임베드 그림이 있는 경우
+    /// serialize → parse 라운드트립에서 둘 다 보존돼야 한다.
+    #[test]
+    fn rect_draw_text_with_picture_roundtrips_through_hwpx() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Control;
+        use crate::model::document::Document;
+        use crate::model::image::{ImageAttr, Picture};
+        use crate::model::shape::{CommonObjAttr, ShapeObject};
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let fake_png = b"\x89PNG\r\n\x1a\nfake_drawtext_image";
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: fake_png.to_vec(),
+            extension: "png".to_string(),
+        });
+
+        // 글상자 문단: 그림 슬롯(8 유닛) 뒤에 "제목"
+        let mut tb_para = Paragraph::default();
+        tb_para.text = "제목".to_string();
+        tb_para.char_offsets = vec![8, 9];
+        tb_para.char_count = 11;
+        tb_para.controls.push(Control::Picture(Box::new(Picture {
+            common: CommonObjAttr {
+                width: 5000,
+                height: 3000,
+                treat_as_char: true,
+                ..Default::default()
+            },
+            image_attr: ImageAttr {
+                bin_data_id: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        })));
+
+        let mut rect = RectangleShape::default();
+        rect.common.width = 10000;
+        rect.common.height = 5000;
+        rect.drawing.text_box = Some(TextBox {
+            paragraphs: vec![tb_para],
+            ..Default::default()
+        });
+
+        let mut section = crate::model::document::Section::default();
+        let mut para = Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls
+            .push(Control::Shape(Box::new(ShapeObject::Rectangle(rect))));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rect = parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Shape(s) => match s.as_ref() {
+                    ShapeObject::Rectangle(r) => Some(r),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("rect shape must survive roundtrip");
+        let tb = rect
+            .drawing
+            .text_box
+            .as_ref()
+            .expect("drawText (text_box) must survive roundtrip");
+        assert!(
+            !tb.paragraphs.is_empty(),
+            "drawText paragraphs must survive"
+        );
+        assert!(
+            tb.paragraphs[0].text.contains("제목"),
+            "shape text must roundtrip: {:?}",
+            tb.paragraphs[0].text
+        );
+        let pic = tb.paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("picture inside drawText must survive hwpx roundtrip");
+        assert_eq!(
+            pic.image_attr.bin_data_id, 1,
+            "drawText picture must keep its bin_data reference"
+        );
     }
 }

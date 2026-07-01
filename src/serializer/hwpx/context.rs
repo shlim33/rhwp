@@ -114,18 +114,11 @@ impl SerializeContext {
 
         // 인라인 컨트롤(표/그림 등)의 borderFillIDRef를 사전 등록하여
         // assert_all_refs_resolved 검증 시 누락 방지.
+        // 셀 문단·글상자 문단 내부의 중첩 컨트롤도 직렬화되므로 재귀 등록한다.
         for sec in &doc.sections {
             for para in &sec.paragraphs {
                 for ctrl in &para.controls {
-                    if let Control::Table(tbl) = ctrl {
-                        ctx.border_fill_ids.register(tbl.border_fill_id);
-                        for zone in &tbl.zones {
-                            ctx.border_fill_ids.register(zone.border_fill_id);
-                        }
-                        for cell in &tbl.cells {
-                            ctx.border_fill_ids.register(cell.border_fill_id);
-                        }
-                    }
+                    register_control_border_fills(&mut ctx, ctrl);
                 }
             }
         }
@@ -198,6 +191,39 @@ impl SerializeContext {
                 missing.join("; ")
             )))
         }
+    }
+}
+
+/// 컨트롤 트리를 재귀로 훑어 표의 borderFillIDRef 를 사전 등록한다.
+/// (본문 표 → 셀 문단 컨트롤, 사각형 글상자 문단 컨트롤까지 — 직렬화가 도달하는 범위와 동일.)
+fn register_control_border_fills(ctx: &mut SerializeContext, ctrl: &Control) {
+    match ctrl {
+        Control::Table(tbl) => {
+            ctx.border_fill_ids.register(tbl.border_fill_id);
+            for zone in &tbl.zones {
+                ctx.border_fill_ids.register(zone.border_fill_id);
+            }
+            for cell in &tbl.cells {
+                ctx.border_fill_ids.register(cell.border_fill_id);
+                for para in &cell.paragraphs {
+                    for nested in &para.controls {
+                        register_control_border_fills(ctx, nested);
+                    }
+                }
+            }
+        }
+        Control::Shape(shape) => {
+            if let crate::model::shape::ShapeObject::Rectangle(r) = shape.as_ref() {
+                if let Some(tb) = &r.drawing.text_box {
+                    for para in &tb.paragraphs {
+                        for nested in &para.controls {
+                            register_control_border_fills(ctx, nested);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
