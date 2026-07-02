@@ -853,6 +853,42 @@ window.addEventListener('message', async (e) => {
         reply(result);
         break;
       }
+      case 'hasSelection':
+        await initPromise;
+        reply(inputHandler?.hasSelection() ?? false);
+        break;
+      case 'getSelection':
+        await initPromise;
+        reply(inputHandler?.getSelection() ?? null);
+        break;
+      case 'getSelectedText':
+        await initPromise;
+        if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+        reply(inputHandler.getSelectedText());
+        break;
+      case 'replaceSelection': {
+        await initPromise;
+        if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+        const result = inputHandler.replaceSelectionText(String(params?.text ?? ''));
+        canvasView?.loadDocument();
+        reply(result);
+        break;
+      }
+      case 'replaceSelectionWithImage': {
+        await initPromise;
+        if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+        const bytes = new Uint8Array(params?.data ?? []);
+        const result = inputHandler.replaceSelectionWithImage(
+          bytes,
+          String(params?.extension ?? 'png'),
+          Number(params?.naturalWidth ?? 1),
+          Number(params?.naturalHeight ?? 1),
+          String(params?.fileName ?? 'worksheet-ai-image.png'),
+        );
+        canvasView?.loadDocument();
+        reply(result);
+        break;
+      }
       case 'pageCount':
         await initPromise;
         reply(wasm.pageCount);
@@ -879,6 +915,18 @@ window.addEventListener('message', async (e) => {
       case 'exportHwpVerify':
         await initPromise;
         reply(JSON.parse(wasm.exportHwpVerify()));
+        break;
+      // Craftnote: unsaved-state bridge — the host owns persistence (upload),
+      // so it needs to read the dirty flag before download and reset it after
+      // a successful save. See docs/rhwp-fork-management.md (fork delta).
+      case 'isDirty':
+        await initPromise;
+        reply(documentState.isDirty());
+        break;
+      case 'markClean':
+        await initPromise;
+        documentState.markClean('host-saved');
+        reply(true);
         break;
       // Craftnote: read-only content getters for op-capture save — extract
       // current paragraph text + char styling to diff against the original

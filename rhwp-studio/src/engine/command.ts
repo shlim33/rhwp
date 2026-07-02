@@ -56,6 +56,44 @@ function doInsertText(wasm: WasmBridge, pos: DocumentPosition, text: string): vo
   }
 }
 
+function normalizeCharProps(props?: Partial<CharProperties>): Partial<CharProperties> | undefined {
+  if (!props || Object.keys(props).length === 0) return undefined;
+  return { ...props };
+}
+
+function charPropsKey(props?: Partial<CharProperties>): string {
+  if (!props) return '';
+  return Object.keys(props)
+    .sort()
+    .map((key) => key + ':' + JSON.stringify((props as Record<string, unknown>)[key]))
+    .join('|');
+}
+
+function doApplyCharFormat(
+  wasm: WasmBridge,
+  pos: DocumentPosition,
+  startOffset: number,
+  endOffset: number,
+  props: Partial<CharProperties>,
+): void {
+  if (endOffset <= startOffset) return;
+  const propsJson = JSON.stringify(props);
+  if (isCell(pos)) {
+    wasm.applyCharFormatInCell(
+      pos.sectionIndex,
+      pos.parentParaIndex!,
+      pos.controlIndex!,
+      pos.cellIndex!,
+      pos.cellParaIndex!,
+      startOffset,
+      endOffset,
+      propsJson,
+    );
+  } else {
+    wasm.applyCharFormat(pos.sectionIndex, pos.paragraphIndex, startOffset, endOffset, propsJson);
+  }
+}
+
 function doDeleteText(wasm: WasmBridge, pos: DocumentPosition, count: number): void {
   if (isNestedCell(pos)) {
     wasm.deleteTextInCellByPath(pos.sectionIndex, pos.parentParaIndex!, cellPathJson(pos), pos.charOffset, count);
@@ -82,16 +120,29 @@ export class InsertTextCommand implements EditCommand {
   readonly type = 'insertText';
   readonly timestamp: number;
 
+  private charProps?: Partial<CharProperties>;
+
   constructor(
     private position: DocumentPosition,
     private text: string,
     timestamp?: number,
+    charProps?: Partial<CharProperties>,
   ) {
     this.timestamp = timestamp ?? Date.now();
+    this.charProps = normalizeCharProps(charProps);
   }
 
   execute(wasm: WasmBridge): DocumentPosition {
     doInsertText(wasm, this.position, this.text);
+    if (this.charProps) {
+      doApplyCharFormat(
+        wasm,
+        this.position,
+        this.position.charOffset,
+        this.position.charOffset + this.text.length,
+        this.charProps,
+      );
+    }
     return { ...this.position, charOffset: this.position.charOffset + this.text.length };
   }
 
@@ -117,10 +168,11 @@ export class InsertTextCommand implements EditCommand {
     if (other.position.charOffset !== expectedOffset) return null;
     // 300ms 이내
     if (other.timestamp - this.timestamp > 300) return null;
+    if (charPropsKey(other.charProps) !== charPropsKey(this.charProps)) return null;
     // 줄바꿈/탭 포함 시 병합 불가
     if (other.text.includes('\n') || other.text.includes('\t')) return null;
 
-    return new InsertTextCommand(this.position, this.text + other.text, this.timestamp);
+    return new InsertTextCommand(this.position, this.text + other.text, this.timestamp, this.charProps);
   }
 }
 

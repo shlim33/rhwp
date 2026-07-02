@@ -5,7 +5,7 @@ import { CaretRenderer } from './caret-renderer';
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
-import { DeleteSelectionCommand, ApplyCharFormatCommand, SnapshotCommand } from './command';
+import { DeleteSelectionCommand, InsertTextCommand, SplitParagraphCommand, SplitParagraphInCellCommand, ApplyCharFormatCommand, SnapshotCommand } from './command';
 import type { OperationDescriptor } from './command';
 import { VirtualScroll } from '@/view/virtual-scroll';
 import { ViewportManager } from '@/view/viewport-manager';
@@ -23,6 +23,9 @@ import * as _table from './input-handler-table';
 import * as _keyboard from './input-handler-keyboard';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
+import { clipboardItemsToDataTransfer } from './clipboard-transfer';
+import { nextParaLevel } from './para-level';
+import { showToast } from '@/ui/toast';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DRAG_SCROLL_EDGE_PX = 48;
@@ -2207,6 +2210,162 @@ export class InputHandler {
   /** 선택 영역이 있는가? */
   hasSelection(): boolean { return this.cursor.hasSelection(); }
 
+  private assertTextSelectionRange(start: DocumentPosition, end: DocumentPosition): void {
+    if (start.sectionIndex !== end.sectionIndex) {
+      throw new Error('AI 대체는 같은 구역 안의 텍스트 선택만 지원합니다.');
+    }
+    if (start.isTextBox || end.isTextBox || (start.cellPath?.length ?? 0) > 1 || (end.cellPath?.length ?? 0) > 1) {
+      throw new Error('AI 대체는 본문 또는 같은 표 셀 안의 일반 텍스트 선택만 지원합니다.');
+    }
+    const startInCell = start.parentParaIndex !== undefined;
+    const endInCell = end.parentParaIndex !== undefined;
+    if (startInCell !== endInCell) {
+      throw new Error('AI 대체는 본문과 표 셀을 가로지르는 선택을 지원하지 않습니다.');
+    }
+    if (startInCell) {
+      if (
+        start.parentParaIndex !== end.parentParaIndex ||
+        start.controlIndex !== end.controlIndex ||
+        start.cellIndex !== end.cellIndex
+      ) {
+        throw new Error('AI 대체는 같은 표 셀 안의 텍스트 선택만 지원합니다.');
+      }
+    }
+  }
+
+  /** 현재 선택 영역의 plain text를 반환한다 (iframe API용). */
+  getSelectedText(): string {
+    const sel = this.cursor.getSelectionOrdered();
+    if (!sel) return '';
+    const { start, end } = sel;
+    this.assertTextSelectionRange(start, end);
+    if (start.parentParaIndex !== undefined) {
+      this.wasm.copySelectionInCell(
+        start.sectionIndex, start.parentParaIndex, start.controlIndex!, start.cellIndex!,
+        start.cellParaIndex!, start.charOffset,
+        end.cellParaIndex!, end.charOffset,
+      );
+    } else {
+      this.wasm.copySelection(
+        start.sectionIndex,
+        start.paragraphIndex, start.charOffset,
+        end.paragraphIndex, end.charOffset,
+      );
+    }
+    return this.wasm.getClipboardText();
+  }
+
+  private insertPlainTextAt(position: DocumentPosition, text: string): DocumentPosition {
+    let current = { ...position };
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i]) {
+        current = new InsertTextCommand(current, lines[i]).execute(this.wasm);
+      }
+      if (i < lines.length - 1) {
+        current = current.parentParaIndex !== undefined
+          ? new SplitParagraphInCellCommand(current).execute(this.wasm)
+          : new SplitParagraphCommand(current).execute(this.wasm);
+      }
+    }
+    return current;
+  }
+
+  /** 현재 선택 영역을 plain text로 대체한다 (iframe API용). */
+  replaceSelectionText(text: string): { replacedChars: number; pageCount: number } {
+    const sel = this.cursor.getSelectionOrdered();
+    if (!sel) throw new Error('대체할 텍스트를 먼저 선택하세요.');
+    const start = { ...sel.start };
+    const end = { ...sel.end };
+    this.assertTextSelectionRange(start, end);
+    this.executeOperation({
+      kind: 'snapshot',
+      operationType: 'replaceSelectionText',
+      operation: () => {
+        const deleteCommand = new DeleteSelectionCommand(start, end);
+        const insertAt = deleteCommand.execute(this.wasm);
+        return this.insertPlainTextAt(insertAt, text);
+      },
+    });
+    this.cursor.clearSelection();
+    this.focusTextarea();
+    return { replacedChars: text.length, pageCount: this.wasm.pageCount };
+  }
+
+  private imageSizeToHwpUnits(sectionIndex: number, naturalWidth: number, naturalHeight: number): { width: number; height: number } {
+    const widthPx = Math.max(1, Math.round(naturalWidth || 1024));
+    const heightPx = Math.max(1, Math.round(naturalHeight || widthPx));
+    let width = Math.round(widthPx * 75);
+    let height = Math.round(heightPx * 75);
+    try {
+      const pageDef = this.wasm.getPageDef(sectionIndex);
+      const colWidth = pageDef.width - pageDef.marginLeft - pageDef.marginRight;
+      if (colWidth > 0 && width > colWidth) {
+        const ratio = colWidth / width;
+        width = Math.round(colWidth);
+        height = Math.round(height * ratio);
+      }
+    } catch { /* 페이지 정보 없으면 원본 비율 유지 */ }
+    return { width, height };
+  }
+
+  /** 현재 본문 선택 영역을 이미지로 대체한다 (iframe API용). */
+  replaceSelectionWithImage(
+    data: Uint8Array,
+    ext: string,
+    naturalWidth: number,
+    naturalHeight: number,
+    fileName = 'worksheet-ai-image.png',
+  ): { inserted: boolean; pageCount: number; controlIndex?: number } {
+    const sel = this.cursor.getSelectionOrdered();
+    if (!sel) throw new Error('이미지로 대체할 텍스트를 먼저 선택하세요.');
+    const start = { ...sel.start };
+    const end = { ...sel.end };
+    this.assertTextSelectionRange(start, end);
+    if (start.parentParaIndex !== undefined) {
+      throw new Error('AI 이미지 대체는 본문 선택만 지원합니다. 표 셀 안에는 아직 삽입하지 않습니다.');
+    }
+    if (!data.length) throw new Error('삽입할 이미지 데이터가 비어 있습니다.');
+
+    let controlIndex: number | undefined;
+    this.executeOperation({
+      kind: 'snapshot',
+      operationType: 'replaceSelectionWithImage',
+      operation: (wasm: WasmBridge) => {
+        const deleteCommand = new DeleteSelectionCommand(start, end);
+        const insertAt = deleteCommand.execute(wasm);
+        if (insertAt.parentParaIndex !== undefined) {
+          throw new Error('AI 이미지 대체는 본문 선택만 지원합니다.');
+        }
+        const size = this.imageSizeToHwpUnits(insertAt.sectionIndex, naturalWidth, naturalHeight);
+        const cleanExt = (ext || 'png').replace(/^\./, '').toLowerCase() || 'png';
+        const desc = `그림입니다.\r\n원본 그림의 이름: ${fileName}\r\n원본 그림의 크기: 가로 ${naturalWidth}pixel, 세로 ${naturalHeight}pixel`;
+        const result = wasm.insertPicture(
+          insertAt.sectionIndex,
+          insertAt.paragraphIndex,
+          insertAt.charOffset,
+          data,
+          size.width,
+          size.height,
+          Math.max(1, Math.round(naturalWidth || 1)),
+          Math.max(1, Math.round(naturalHeight || 1)),
+          cleanExt,
+          desc,
+        );
+        if (!result.ok) throw new Error('이미지 삽입에 실패했습니다.');
+        controlIndex = (result as any).controlIdx ?? (result as any).controlIndex;
+        return {
+          sectionIndex: insertAt.sectionIndex,
+          paragraphIndex: result.paraIdx + 1,
+          charOffset: 0,
+        } as DocumentPosition;
+      },
+    });
+    this.cursor.clearSelection();
+    this.focusTextarea();
+    return { inserted: true, pageCount: this.wasm.pageCount, controlIndex };
+  }
+
   /** 현재 커서 위치를 반환한다 */
   getCursorPosition(): DocumentPosition { return this.cursor.getPosition(); }
 
@@ -2416,10 +2575,50 @@ export class InputHandler {
     document.execCommand('copy');
   }
 
-  /** 붙이기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
-  performPaste(): boolean {
+  /** 붙이기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출)
+   *
+   * document.execCommand('paste')는 최신 브라우저가 웹 콘텐츠에서 차단하므로 사용하지 않는다.
+   * ① 내부 클립보드 fast path: Ctrl+V 키보드 경로(onPaste)에 clipboardData 없는 합성
+   *    이벤트를 전달 — onPaste의 내부 클립보드 분기(`!clipboardData`)와 동일하게 동작한다.
+   * ② 외부 클립보드: navigator.clipboard.read() 결과를 DataTransfer로 변환하여 같은
+   *    onPaste 경로에 위임한다 (html/표 서식·이미지·플레인 텍스트 분기 재사용).
+   * ③ 권한 거부/빈 클립보드: 토스트로 안내한다 (무음 실패 금지).
+   */
+  performPaste(): void {
     this.focusTextarea();
-    return document.execCommand('paste');
+    // ① 내부 클립보드 fast path — 직전 앱 내 복사/오려두기 내용 (서식 보존)
+    if (this.wasm.hasInternalClipboard()) {
+      this.onPaste(new ClipboardEvent('paste'));
+      return;
+    }
+    // ② 시스템 클립보드 비동기 읽기
+    void this.performPasteFromSystemClipboard();
+  }
+
+  /** navigator.clipboard.read() → 합성 ClipboardEvent로 키보드 붙여넣기 경로 재사용 */
+  private async performPasteFromSystemClipboard(): Promise<void> {
+    let items: ClipboardItem[];
+    try {
+      if (!navigator.clipboard?.read) throw new Error('clipboard.read 미지원');
+      items = await navigator.clipboard.read();
+    } catch {
+      showToast({
+        message: '브라우저 보안 제한으로 클립보드를 읽을 수 없습니다.\nCtrl+V로 붙여넣어 주세요.',
+        durationMs: 5000,
+      });
+      return;
+    }
+    try {
+      const dt = await clipboardItemsToDataTransfer(items);
+      if (dt.types.length === 0) {
+        showToast({ message: '클립보드가 비어 있습니다.', durationMs: 4000 });
+        return;
+      }
+      this.onPaste(new ClipboardEvent('paste', { clipboardData: dt }));
+    } catch (err) {
+      console.warn('[InputHandler] 붙여넣기 실패:', err);
+      showToast({ message: '붙여넣기에 실패했습니다. Ctrl+V로 붙여넣어 주세요.', durationMs: 5000 });
+    }
   }
 
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
@@ -2559,7 +2758,11 @@ export class InputHandler {
 
       // 현재 개요 수준 파싱 (개요 1~7)
       const match = currentStyle.name.match(/^개요\s*(\d)$/);
-      if (!match) return; // 개요 스타일이 아니면 무시
+      if (!match) {
+        // 개요 스타일이 아닌 문단 — 번호/글머리표 문단이면 paraLevel 조정
+        this.changeParaLevel(delta);
+        return;
+      }
 
       const currentLevel = parseInt(match[1], 10);
       const targetLevel = currentLevel + delta;
@@ -2577,6 +2780,24 @@ export class InputHandler {
     } catch (err) {
       console.warn('[InputHandler] changeOutlineLevel 실패:', err);
     }
+  }
+
+  /** 개요 스타일이 아닌 문단의 수준 변경 — 번호/글머리표/개요 head가 있는 문단만
+   *  paraLevel(0~6)을 조정한다. 일반 본문(번호 없음)은 paraLevel 변경이 화면에
+   *  드러나지 않는 무의미한 변경이므로 (한글도 수준 변경은 개요/번호 문단에만
+   *  의미가 있음) 적용하지 않고 토스트로 안내한다. */
+  private changeParaLevel(delta: number): void {
+    const props = this.getParaProperties();
+    if (!props.headType || props.headType === 'None') {
+      showToast({
+        message: '수준 변경은 개요·문단 번호·글머리표 문단에서만 사용할 수 있습니다.',
+        durationMs: 4000,
+      });
+      return;
+    }
+    const target = nextParaLevel(props.paraLevel, delta);
+    if (target === null) return; // 범위(0~6) 밖 — 개요 스타일 경로의 경계 동작과 동일하게 무시
+    this.applyParaFormat({ paraLevel: target });
   }
 
   /** 문단 번호 토글: None→Number, Number/Outline→None */

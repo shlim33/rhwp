@@ -439,7 +439,10 @@ export function onInput(this: any, e?: InputEvent): void {
   if (this.cursor.hasSelection()) {
     this.deleteSelection();
   }
-  this.executeOperation({ kind: 'command', command: new InsertTextCommand(this.cursor.getPosition(), text) });
+  this.executeOperation({
+    kind: 'command',
+    command: new InsertTextCommand(this.cursor.getPosition(), text, undefined, this.pendingCharProps),
+  });
 }
 
 export function insertTextAtRaw(this: any, pos: DocumentPosition, text: string): void {

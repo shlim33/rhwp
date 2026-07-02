@@ -45,6 +45,17 @@
   border-color: #b0b8c8;
 }
 
+/* 미구현/비활성 커맨드 버튼 (예: 모양 복사) — 메뉴 .md-item.disabled 와 동일한 시각 처리 */
+.tb-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tb-btn:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
 /* 한컴 SVG 스프라이트 아이콘 시스템 */
 .tb-sprite {
   display: block;

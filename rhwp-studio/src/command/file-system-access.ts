@@ -27,11 +27,14 @@ export interface FileHandleReadResult {
   bytes: Uint8Array;
 }
 
+export type SaveDocumentFormat = 'hwp' | 'hwpx';
+
 export interface SaveDocumentOptions {
   blob: Blob;
   suggestedName: string;
   currentHandle: FileSystemFileHandleLike | null;
   windowLike: FileSystemWindowLike;
+  format?: SaveDocumentFormat;
   /** [Task #833] true 시 currentHandle 무시 + 항상 showSaveFilePicker 호출 (다른 이름으로 저장). */
   forceSaveAs?: boolean;
 }
@@ -51,6 +54,15 @@ const HWP_SAVE_PICKER_TYPES = [{
   description: 'HWP 문서',
   accept: { 'application/x-hwp': ['.hwp'] },
 }];
+
+const HWPX_SAVE_PICKER_TYPES = [{
+  description: 'HWPX 문서',
+  accept: { 'application/hwp+zip': ['.hwpx'] },
+}];
+
+function savePickerTypes(format: SaveDocumentFormat = 'hwp') {
+  return format === 'hwpx' ? HWPX_SAVE_PICKER_TYPES : HWP_SAVE_PICKER_TYPES;
+}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -87,7 +99,7 @@ export async function readFileFromHandle(handle: FileSystemFileHandleLike): Prom
 }
 
 export async function saveDocumentToFileSystem(options: SaveDocumentOptions): Promise<SaveDocumentResult> {
-  const { blob, suggestedName, currentHandle, windowLike, forceSaveAs } = options;
+  const { blob, suggestedName, currentHandle, windowLike, forceSaveAs, format = 'hwp' } = options;
 
   // [Task #833] forceSaveAs 시 currentHandle 우회 → 항상 picker (다른 이름으로 저장).
   if (currentHandle && !forceSaveAs) {
@@ -102,7 +114,7 @@ export async function saveDocumentToFileSystem(options: SaveDocumentOptions): Pr
   if (windowLike.showSaveFilePicker) {
     const handle = await windowLike.showSaveFilePicker({
       suggestedName,
-      types: HWP_SAVE_PICKER_TYPES,
+      types: savePickerTypes(format),
     });
     await writeBlobToHandle(handle, blob);
     return {
