@@ -1166,38 +1166,51 @@ fn parse_numbering(
 
     if !is_empty_event(e) {
         let mut buf = Vec::new();
+        // 현재 열려 있는 <hh:paraHead> 의 수준 — 한컴은 번호 형식 문자열을
+        // 요소 텍스트로 저장하므로 (`<hh:paraHead ...>^1.</hh:paraHead>`)
+        // Start 이후 Text 이벤트를 해당 수준의 level_formats 로 누적한다.
+        let mut open_level: Option<usize> = None;
+        let mut open_text = String::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Empty(ref ce)) | Ok(Event::Start(ref ce)) => {
+                Ok(Event::Start(ref ce)) => {
                     let cname = ce.name(); let local = local_name(cname.as_ref());
                     if local == b"paraHead" {
-                        let mut level: usize = 0;
-                        let mut head = NumberingHead::default();
-                        let mut format_str = String::new();
-                        for attr in ce.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"level" => level = parse_u32(&attr) as usize,
-                                b"start" => {
-                                    let s = parse_u32(&attr);
-                                    if level > 0 && level <= 7 {
-                                        num.level_start_numbers[level - 1] = s;
-                                    }
-                                }
-                                b"text" => format_str = attr_str(&attr),
-                                b"numFormat" => head.number_format = parse_u8(&attr),
-                                b"charPrIDRef" => head.char_shape_id = parse_u32(&attr),
-                                _ => {}
-                            }
-                        }
-                        if level > 0 && level <= 7 {
-                            num.heads[level - 1] = head;
-                            num.level_formats[level - 1] = format_str;
-                        }
+                        open_level = parse_numbering_para_head(ce, &mut num);
+                        open_text.clear();
+                    }
+                }
+                Ok(Event::Empty(ref ce)) => {
+                    let cname = ce.name(); let local = local_name(cname.as_ref());
+                    if local == b"paraHead" {
+                        parse_numbering_para_head(ce, &mut num);
+                    }
+                }
+                Ok(Event::Text(ref t)) => {
+                    if open_level.is_some() {
+                        open_text.push_str(&t.decode().unwrap_or_default());
+                    }
+                }
+                Ok(Event::GeneralRef(ref r)) => {
+                    // quick-xml 0.39: &amp; 같은 엔티티는 별도 이벤트 — 본문 파싱과 동일 처리
+                    if open_level.is_some() {
+                        open_text.push_str(&super::section::decode_xml_general_ref(r));
                     }
                 }
                 Ok(Event::End(ref ee)) => {
-                    let ename = ee.name(); if local_name(ename.as_ref()) == b"numbering" {
-                        break;
+                    let ename = ee.name();
+                    match local_name(ename.as_ref()) {
+                        b"paraHead" => {
+                            if let Some(level) = open_level.take() {
+                                // 요소 텍스트가 있으면 text 속성보다 우선
+                                if !open_text.trim().is_empty() {
+                                    num.level_formats[level - 1] = open_text.clone();
+                                }
+                            }
+                            open_text.clear();
+                        }
+                        b"numbering" => break,
+                        _ => {}
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -1210,6 +1223,61 @@ fn parse_numbering(
 
     doc_info.numberings.push(num);
     Ok(())
+}
+
+/// `<hh:paraHead>` 속성을 IR 로 반영하고, 유효 수준(1~7)이면 반환한다.
+///
+/// 한컴은 속성을 `start`, `level`, ... 순서로 쓰므로 (start 가 level 보다 앞)
+/// 모든 속성을 먼저 수집한 뒤 수준이 확정되고 나서 배열에 반영해야 한다.
+fn parse_numbering_para_head(
+    ce: &quick_xml::events::BytesStart,
+    num: &mut Numbering,
+) -> Option<usize> {
+    let mut level: usize = 0;
+    let mut start: u32 = 1; // HWP5 파서(unwrap_or(1))와 동일 기본값
+    let mut head = NumberingHead::default();
+    let mut format_str = String::new();
+    for attr in ce.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"level" => level = parse_u32(&attr) as usize,
+            b"start" => start = parse_u32(&attr),
+            b"text" => format_str = attr_str(&attr),
+            b"numFormat" => head.number_format = num_format_code_from_hwpx(&attr_str(&attr)),
+            b"charPrIDRef" => head.char_shape_id = parse_u32(&attr),
+            _ => {}
+        }
+    }
+    if level >= 1 && level <= 7 {
+        num.heads[level - 1] = head;
+        num.level_formats[level - 1] = format_str;
+        num.level_start_numbers[level - 1] = start;
+        Some(level)
+    } else {
+        None
+    }
+}
+
+/// OWPML `numFormat` 문자열(NumberType1) → HWP 표 43 번호 형식 코드.
+/// 알 수 없는 문자열은 과거 rhwp 산출물 호환을 위해 숫자 파싱을 시도하고, 실패 시 0(DIGIT).
+fn num_format_code_from_hwpx(s: &str) -> u8 {
+    match s {
+        "DIGIT" => 0,
+        "CIRCLED_DIGIT" => 1,
+        "ROMAN_CAPITAL" => 2,
+        "ROMAN_SMALL" => 3,
+        "LATIN_CAPITAL" => 4,
+        "LATIN_SMALL" => 5,
+        "CIRCLED_LATIN_CAPITAL" => 6,
+        "CIRCLED_LATIN_SMALL" => 7,
+        "HANGUL_SYLLABLE" => 8,
+        "CIRCLED_HANGUL_SYLLABLE" => 9,
+        "HANGUL_JAMO" => 10,
+        "CIRCLED_HANGUL_JAMO" => 11,
+        "HANGUL_PHONETIC" => 12,
+        "IDEOGRAPH" => 13,
+        "CIRCLED_IDEOGRAPH" => 14,
+        other => other.parse().unwrap_or(0),
+    }
 }
 
 // ─── Bullet ───
@@ -1330,6 +1398,63 @@ fn parse_border_width(attr: &quick_xml::events::attributes::Attribute) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 한컴 원본(user-before.hwpx, samples/hwpx/ref/ref_empty.hwpx 등)은 번호 형식
+    /// 문자열을 paraHead 의 **요소 텍스트**로 저장한다:
+    /// `<hh:paraHead start="1" level="1" ...>^1.</hh:paraHead>`
+    /// (text 속성이 아님). 요소 텍스트를 IR level_formats 로 캡처해야
+    /// 로드된 문서의 문단 번호가 빈 문자열로 렌더되지 않는다.
+    #[test]
+    fn test_parse_numbering_captures_para_head_element_text() {
+        let xml = r#"<hh:numbering id="1" start="0"><hh:paraHead start="1" level="1" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="4294967295">^1.</hh:paraHead><hh:paraHead start="3" level="2" align="LEFT" numFormat="HANGUL_SYLLABLE" charPrIDRef="4294967295">^2.</hh:paraHead><hh:paraHead start="1" level="5" align="LEFT" numFormat="CIRCLED_DIGIT" charPrIDRef="4294967295">(^5)</hh:paraHead></hh:numbering>"#;
+        let mut reader = Reader::from_str(xml);
+        let mut buf = Vec::new();
+        let mut doc_info = DocInfo::default();
+        if let Ok(Event::Start(ref e)) = reader.read_event_into(&mut buf) {
+            parse_numbering(e, &mut reader, &mut doc_info).unwrap();
+        } else {
+            panic!("expected Start event");
+        }
+        assert_eq!(doc_info.numberings.len(), 1);
+        let num = &doc_info.numberings[0];
+        assert_eq!(num.level_formats[0], "^1.", "level 1 format text must be captured");
+        assert_eq!(num.level_formats[1], "^2.", "level 2 format text must be captured");
+        assert_eq!(num.level_formats[4], "(^5)", "level 5 format text must be captured");
+        // numFormat 문자열 → HWP 표 43 코드
+        assert_eq!(num.heads[0].number_format, 0, "DIGIT");
+        assert_eq!(num.heads[1].number_format, 8, "HANGUL_SYLLABLE");
+        assert_eq!(num.heads[4].number_format, 1, "CIRCLED_DIGIT");
+        // 한컴은 start 속성을 level 속성보다 앞에 쓴다 — 속성 순서와 무관하게 캡처
+        assert_eq!(num.level_start_numbers[0], 1);
+        assert_eq!(num.level_start_numbers[1], 3);
+    }
+
+    /// 골든 핀 — in-repo 한컴 샘플의 numbering paraHead 형식 문자열.
+    /// (user-before.hwpx 와 동일한 한컴 기본 7수준 패턴)
+    #[test]
+    fn test_parse_numbering_golden_ref_empty_formats() {
+        let bytes = include_bytes!("../../../samples/hwpx/ref/ref_empty.hwpx");
+        let doc = crate::parser::hwpx::parse_hwpx(bytes).expect("parse ref_empty");
+        assert!(!doc.doc_info.numberings.is_empty(), "ref_empty must have a numbering");
+        let num = &doc.doc_info.numberings[0];
+        assert_eq!(
+            num.level_formats,
+            [
+                "^1.".to_string(),
+                "^2.".to_string(),
+                "^3)".to_string(),
+                "^4)".to_string(),
+                "(^5)".to_string(),
+                "(^6)".to_string(),
+                "^7".to_string(),
+            ],
+            "Hancom paraHead element text must land in level_formats"
+        );
+        // 관찰값 (ref_empty.hwpx header.xml): 홀수 수준 DIGIT(0), 짝수 수준 HANGUL_SYLLABLE(8),
+        // 7수준 CIRCLED_DIGIT(1)
+        assert_eq!(num.heads[1].number_format, 8, "level 2 numFormat=HANGUL_SYLLABLE");
+        assert_eq!(num.heads[6].number_format, 1, "level 7 numFormat=CIRCLED_DIGIT");
+    }
 
     #[test]
     fn test_parse_bullet_populates_doc_info() {

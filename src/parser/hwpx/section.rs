@@ -692,7 +692,7 @@ fn read_text_content(reader: &mut Reader<&[u8]>) -> Result<String, HwpxError> {
     Ok(text)
 }
 
-fn decode_xml_general_ref(r: &BytesRef<'_>) -> String {
+pub(crate) fn decode_xml_general_ref(r: &BytesRef<'_>) -> String {
     if let Ok(Some(ch)) = r.resolve_char_ref() {
         return ch.to_string();
     }
@@ -1956,10 +1956,9 @@ fn parse_line_shape_attr(e: &quick_xml::events::BytesStart) -> ShapeBorderLine {
     for attr in e.attributes().flatten() {
         match attr.key.as_ref() {
             b"color" => {
-                let s = attr_str(&attr);
-                if let Some(hex) = s.strip_prefix('#') {
-                    bl.color = u32::from_str_radix(hex, 16).unwrap_or(0);
-                }
+                // "#RRGGBB" → ColorRef(0x00BBGGRR). raw 16진 파싱은 R/B 가 뒤집혀
+                // 렌더러(color_to_svg)·serializer(color_hex)·fillBrush 파싱과 어긋난다.
+                bl.color = parse_color(&attr);
             }
             b"width" => bl.width = parse_i32(&attr),
             b"style" => {

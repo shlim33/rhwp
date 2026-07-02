@@ -24,7 +24,9 @@ use crate::model::ColorRef;
 
 use super::canonical_defaults::FONTFACE_LANG_NAMES;
 use super::context::SerializeContext;
-use super::utils::{empty_tag, end_tag, start_tag_attrs, write_xml_decl};
+use super::utils::{
+    color_hex, empty_tag, end_tag, start_tag_attrs, text, write_fill_brush, write_xml_decl,
+};
 use super::SerializeError;
 
 /// `header.xml` 바이트 생성. Stage 1 진입점.
@@ -221,135 +223,6 @@ fn write_border_fill<W: Write>(
     Ok(())
 }
 
-/// `<hc:fillBrush>` 자식 직렬화 — HWPX parser 계약
-/// (src/parser/hwpx/header.rs `parse_border_fill` 의 winBrush/gradation/imgBrush 분기)의
-/// 역방향 미러.
-fn write_fill_brush<W: Write>(
-    w: &mut Writer<W>,
-    fill: &Fill,
-    ctx: &SerializeContext,
-) -> Result<(), SerializeError> {
-    start_tag(w, "hc:fillBrush")?;
-    match fill.fill_type {
-        FillType::Solid => {
-            if let Some(solid) = &fill.solid {
-                let face = color_hex(solid.background_color);
-                let hatch = color_hex(solid.pattern_color);
-                let alpha = fill_alpha_str(fill.alpha);
-                // 속성 순서: faceColor, hatchColor, (hatchStyle), alpha (한컴 관찰: aift.hwpx 등)
-                let mut attrs: Vec<(&str, &str)> =
-                    vec![("faceColor", &face), ("hatchColor", &hatch)];
-                if let Some(hs) = hatch_style_str(solid.pattern_type) {
-                    attrs.push(("hatchStyle", hs));
-                }
-                attrs.push(("alpha", &alpha));
-                empty_tag(w, "hc:winBrush", &attrs)?;
-            }
-        }
-        FillType::Gradient => {
-            if let Some(grad) = &fill.gradient {
-                let ty = grad.gradient_type.to_string();
-                let angle = grad.angle.to_string();
-                let cx = grad.center_x.to_string();
-                let cy = grad.center_y.to_string();
-                let blur = grad.blur.to_string();
-                start_tag_attrs(
-                    w,
-                    "hc:gradation",
-                    &[
-                        ("type", &ty),
-                        ("angle", &angle),
-                        ("centerX", &cx),
-                        ("centerY", &cy),
-                        ("blur", &blur),
-                    ],
-                )?;
-                for c in &grad.colors {
-                    let v = color_hex(*c);
-                    empty_tag(w, "hc:color", &[("value", &v)])?;
-                }
-                end_tag(w, "hc:gradation")?;
-            }
-        }
-        FillType::Image => {
-            if let Some(img) = &fill.image {
-                let bright = img.brightness.to_string();
-                let contrast = img.contrast.to_string();
-                start_tag_attrs(
-                    w,
-                    "hc:imgBrush",
-                    &[
-                        ("mode", image_fill_mode_str(img.fill_mode)),
-                        ("bright", &bright),
-                        ("contrast", &contrast),
-                    ],
-                )?;
-                // binaryItemIDRef 는 그림(<hc:img>)과 동일하게 ctx.bin_data_map 을 통해
-                // manifest id 로 변환. 미등록 bin_data_id 면 img 자식만 생략 (panic 금지).
-                if let Some(manifest_id) = ctx.resolve_bin_id(img.bin_data_id) {
-                    empty_tag(w, "hc:img", &[("binaryItemIDRef", manifest_id)])?;
-                }
-                end_tag(w, "hc:imgBrush")?;
-            }
-        }
-        FillType::None => {}
-    }
-    end_tag(w, "hc:fillBrush")?;
-    Ok(())
-}
-
-/// alpha u8(0~255) → HWPX float 문자열(0.0~1.0).
-///
-/// parser 는 `(f * 255) as u8` (버림) 로 되읽으므로, 중간값은 `(a + 0.5) / 255` 로 내보내
-/// 부동소수점 반올림 오차와 무관하게 정확히 `a` 로 복원되게 한다.
-/// 한컴 관찰값(aift.hwpx 등)은 대부분 정수 표기 `alpha="0"`.
-fn fill_alpha_str(alpha: u8) -> String {
-    match alpha {
-        0 => "0".to_string(),
-        255 => "1".to_string(),
-        a => ((a as f64 + 0.5) / 255.0).to_string(),
-    }
-}
-
-/// `parse_hatch_style` (src/parser/hwpx/utils.rs) 의 역함수.
-/// pattern_type 1~6 외에는 hatchStyle 속성 자체를 생략한다 (무늬 없음).
-fn hatch_style_str(pattern_type: i32) -> Option<&'static str> {
-    match pattern_type {
-        1 => Some("HORIZONTAL"),
-        2 => Some("VERTICAL"),
-        3 => Some("BACK_SLASH"),
-        4 => Some("SLASH"),
-        5 => Some("CROSS"),
-        6 => Some("CROSS_DIAGONAL"),
-        _ => None,
-    }
-}
-
-/// ImageFillMode → OWPML `imgBrush/@mode` 문자열.
-/// parser 가 같은 variant 로 역매핑하는 문자열을 우선 사용한다.
-fn image_fill_mode_str(m: ImageFillMode) -> &'static str {
-    match m {
-        ImageFillMode::TileAll => "TILE",
-        ImageFillMode::TileHorzTop => "TILE_HORZ_TOP",
-        ImageFillMode::TileHorzBottom => "TILE_HORZ_BOTTOM",
-        ImageFillMode::TileVertLeft => "TILE_VERT_LEFT",
-        ImageFillMode::TileVertRight => "TILE_VERT_RIGHT",
-        ImageFillMode::FitToSize => "TOTAL",
-        ImageFillMode::Center => "CENTER",
-        ImageFillMode::CenterTop => "CENTER_TOP",
-        ImageFillMode::CenterBottom => "CENTER_BOTTOM",
-        ImageFillMode::LeftTop => "TOP_LEFT_ALIGN",
-        // 아래 variant 들은 rhwp parser 에 역매핑 문자열이 없다 (parser 한계).
-        // OWPML 정식 명칭으로 내보낸다.
-        ImageFillMode::LeftCenter => "LEFT_CENTER",
-        ImageFillMode::LeftBottom => "LEFT_BOTTOM",
-        ImageFillMode::RightCenter => "RIGHT_CENTER",
-        ImageFillMode::RightTop => "RIGHT_TOP",
-        ImageFillMode::RightBottom => "RIGHT_BOTTOM",
-        ImageFillMode::None => "NONE",
-    }
-}
-
 fn write_diag_line<W: Write>(w: &mut Writer<W>, name: &str) -> Result<(), SerializeError> {
     empty_tag(
         w,
@@ -431,24 +304,6 @@ fn border_width_mm(w: u8) -> &'static str {
         14 => "4.0",
         15 => "5.0",
         _ => "0.1",
-    }
-}
-
-fn color_hex(c: ColorRef) -> String {
-    // ColorRef = u32. HWP 내부 저장: 상위 바이트가 비투명 플래그(0이면 유효 색상).
-    // 0xFFFFFFFF = 투명/없음 센티넬 → "none"
-    if c == 0xFFFFFFFF {
-        return "none".to_string();
-    }
-    // HWPX는 "#RRGGBB" 또는 "#AARRGGBB".
-    let a = ((c >> 24) & 0xFF) as u8;
-    let r = (c & 0xFF) as u8;
-    let g = ((c >> 8) & 0xFF) as u8;
-    let b = ((c >> 16) & 0xFF) as u8;
-    if a == 0 {
-        format!("#{:02X}{:02X}{:02X}", r, g, b)
-    } else {
-        format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
     }
 }
 
@@ -759,6 +614,8 @@ fn write_numbering<W: Write>(
         ],
     )?;
     // Stage 1: 10 레벨 paraHead 뼈대 출력. 실제 값은 NumberingHead 참조해 생성.
+    // 번호 형식 문자열(level_formats)은 한컴과 동일하게 **요소 텍스트**로 출력한다:
+    // `<hh:paraHead ...>^1.</hh:paraHead>` (미출력 시 문단 번호가 빈 문자열로 렌더됨).
     for level in 0..10usize {
         let idx = level.min(6);
         let h = &n.heads[idx];
@@ -766,26 +623,54 @@ fn write_numbering<W: Write>(
         let level_s = (level + 1).to_string();
         let start_s = start.to_string();
         let wa = h.width_adjust.to_string();
-        empty_tag(
-            w,
-            "hh:paraHead",
-            &[
-                ("start", &start_s),
-                ("level", &level_s),
-                ("align", "LEFT"),
-                ("useInstWidth", "1"),
-                ("autoIndent", "1"),
-                ("widthAdjust", &wa),
-                ("textOffsetType", "PERCENT"),
-                ("textOffset", "50"),
-                ("numFormat", "DIGIT"),
-                ("charPrIDRef", &u32::MAX.to_string()),
-                ("checkable", "0"),
-            ],
-        )?;
+        let attrs: [(&str, &str); 11] = [
+            ("start", &start_s),
+            ("level", &level_s),
+            ("align", "LEFT"),
+            ("useInstWidth", "1"),
+            ("autoIndent", "1"),
+            ("widthAdjust", &wa),
+            ("textOffsetType", "PERCENT"),
+            ("textOffset", "50"),
+            ("numFormat", num_format_str(h.number_format)),
+            ("charPrIDRef", "4294967295"),
+            ("checkable", "0"),
+        ];
+        // IR 은 7수준까지만 보유 — 8~10수준은 한컴 관찰값(ref_empty.hwpx)처럼 빈 요소.
+        let fmt = if level < 7 { n.level_formats[level].as_str() } else { "" };
+        if fmt.is_empty() {
+            empty_tag(w, "hh:paraHead", &attrs)?;
+        } else {
+            start_tag_attrs(w, "hh:paraHead", &attrs)?;
+            text(w, fmt)?;
+            end_tag(w, "hh:paraHead")?;
+        }
     }
     end_tag(w, "hh:numbering")?;
     Ok(())
+}
+
+/// HWP 표 43 번호 형식 코드 → OWPML `numFormat` 문자열(NumberType1).
+/// parser(`num_format_code_from_hwpx`)의 역함수.
+fn num_format_str(code: u8) -> &'static str {
+    match code {
+        0 => "DIGIT",
+        1 => "CIRCLED_DIGIT",
+        2 => "ROMAN_CAPITAL",
+        3 => "ROMAN_SMALL",
+        4 => "LATIN_CAPITAL",
+        5 => "LATIN_SMALL",
+        6 => "CIRCLED_LATIN_CAPITAL",
+        7 => "CIRCLED_LATIN_SMALL",
+        8 => "HANGUL_SYLLABLE",
+        9 => "CIRCLED_HANGUL_SYLLABLE",
+        10 => "HANGUL_JAMO",
+        11 => "CIRCLED_HANGUL_JAMO",
+        12 => "HANGUL_PHONETIC",
+        13 => "IDEOGRAPH",
+        14 => "CIRCLED_IDEOGRAPH",
+        _ => "DIGIT",
+    }
 }
 
 // =====================================================================
@@ -1151,6 +1036,78 @@ mod tests {
         let ctx = SerializeContext::collect_from_document(&doc);
         let xml = String::from_utf8(write_header(&doc, &ctx).unwrap()).unwrap();
         assert_eq!(xml.matches("<hh:fontface ").count(), 7);
+    }
+
+    // ---------------------------------------------------------------
+    // numbering paraHead 형식 텍스트 (문단번호가 빈 문자열로 렌더되던 버그)
+    // 한컴은 번호 형식을 paraHead 의 요소 텍스트로 저장한다: <hh:paraHead ...>^1.</hh:paraHead>
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn write_numbering_emits_para_head_format_text() {
+        use crate::model::style::NumberingHead;
+
+        let mut doc = Document::default();
+        let mut n = Numbering::default();
+        n.start_number = 1;
+        n.level_start_numbers = [1; 7];
+        n.level_formats = [
+            "^1.".to_string(),
+            "^2.".to_string(),
+            "^3)".to_string(),
+            "^4)".to_string(),
+            "(^5)".to_string(),
+            "(^6)".to_string(),
+            "^7".to_string(),
+        ];
+        n.heads[1] = NumberingHead { number_format: 8, ..Default::default() }; // 가,나,다
+        n.heads[6] = NumberingHead { number_format: 1, ..Default::default() }; // ①②③
+        doc.doc_info.numberings.push(n);
+
+        let ctx = SerializeContext::collect_from_document(&doc);
+        let xml = String::from_utf8(write_header(&doc, &ctx).unwrap()).unwrap();
+        assert!(
+            xml.contains(">^1.</hh:paraHead>"),
+            "format text must be element content, not dropped: {}",
+            &xml[xml.find("<hh:numberings").unwrap_or(0)..]
+        );
+        assert!(xml.contains(">(^5)</hh:paraHead>"), "level 5 format text");
+        assert!(
+            xml.contains(r#"numFormat="HANGUL_SYLLABLE""#),
+            "numFormat must reflect head.number_format (8 → HANGUL_SYLLABLE)"
+        );
+        assert!(
+            xml.contains(r#"numFormat="CIRCLED_DIGIT""#),
+            "numFormat must reflect head.number_format (1 → CIRCLED_DIGIT)"
+        );
+    }
+
+    /// 골든 핀: 한컴 샘플 parse → IR → serialize → reparse 시
+    /// 번호 형식 문자열·numFormat 코드가 정확히 보존돼야 한다.
+    #[test]
+    fn numbering_para_head_golden_roundtrip_ref_empty() {
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let bytes = include_bytes!("../../../samples/hwpx/ref/ref_empty.hwpx");
+        let doc = parse_hwpx(bytes).expect("parse ref_empty");
+        let expected = [
+            "^1.".to_string(),
+            "^2.".to_string(),
+            "^3)".to_string(),
+            "^4)".to_string(),
+            "(^5)".to_string(),
+            "(^6)".to_string(),
+            "^7".to_string(),
+        ];
+        assert_eq!(doc.doc_info.numberings[0].level_formats, expected);
+
+        let out = serialize_hwpx(&doc).expect("serialize");
+        let reparsed = parse_hwpx(&out).expect("reparse");
+        let num = &reparsed.doc_info.numberings[0];
+        assert_eq!(num.level_formats, expected, "format strings must survive save/reopen");
+        assert_eq!(num.heads[1].number_format, 8, "HANGUL_SYLLABLE must survive");
+        assert_eq!(num.heads[6].number_format, 1, "CIRCLED_DIGIT must survive");
+        assert_eq!(num.level_start_numbers, [1; 7], "level start numbers must survive");
     }
 
     // ---------------------------------------------------------------

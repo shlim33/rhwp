@@ -166,6 +166,75 @@ mod tests {
         assert_eq!(parsed.sections.len(), 1);
     }
 
+    /// E2E — 사용자 시나리오 재현: 편집기에서 그린 사각형(테두리+채우기, 페이지 오프셋)을
+    /// export 하면 section XML 에 hp:lineShape / hc:fillBrush / hc:pt0..3 이 있어야 한다.
+    /// (user2-152976e6.hwpx 는 sz/pos/outMargin 만 있어 재열기 시 도형이 투명해졌다.)
+    #[test]
+    fn export_rect_with_border_and_fill_emits_line_shape_and_fill_brush() {
+        use crate::model::control::Control;
+        use crate::model::shape::{RectangleShape, ShapeObject};
+        use crate::model::style::{Fill, FillType, ShapeBorderLine, SolidFill};
+
+        let mut rect = RectangleShape::default();
+        rect.common.width = 11699;
+        rect.common.height = 7801;
+        rect.common.vertical_offset = 28276;
+        rect.common.horizontal_offset = 13589;
+        rect.drawing.border_line = ShapeBorderLine {
+            color: 0, // #000000
+            width: 33,
+            attr: 1, // SOLID
+            outline_style: 0,
+        };
+        rect.drawing.fill = Fill {
+            fill_type: FillType::Solid,
+            solid: Some(SolidFill {
+                background_color: 0x00F0B000, // "#00B0F0"
+                pattern_color: 0,
+                pattern_type: -1,
+            }),
+            gradient: None,
+            image: None,
+            alpha: 0,
+        };
+        rect.x_coords = [0, 11699, 11699, 0];
+        rect.y_coords = [0, 0, 7801, 7801];
+
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls
+            .push(Control::Shape(Box::new(ShapeObject::Rectangle(rect))));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("valid zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+
+        assert!(
+            xml.contains(r##"<hp:lineShape color="#000000" width="33" style="SOLID""##),
+            "exported rect must carry its stroke: {xml}"
+        );
+        assert!(
+            xml.contains(r##"<hc:fillBrush><hc:winBrush faceColor="#00B0F0""##),
+            "exported rect must carry its fill: {xml}"
+        );
+        assert!(
+            xml.contains(r#"<hc:pt2 x="11699" y="7801"/>"#),
+            "exported rect must carry corner points: {xml}"
+        );
+    }
+
     #[test]
     fn serialize_text_paragraph_roundtrip() {
         let mut doc = Document::default();

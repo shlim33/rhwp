@@ -427,7 +427,7 @@ fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
     }
     // Line: Writer-based serializer
     if let ShapeObject::Line(l) = shape {
-        return match writer_to_string(|w| super::shape::write_line(w, l)) {
+        return match writer_to_string(|w| super::shape::write_line(w, l, ctx)) {
             Ok(xml) => xml,
             Err(e) => { eprintln!("[hwpx] Shape::Line 직렬화 실패: {e}"); String::new() }
         };
@@ -450,48 +450,73 @@ fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
             Err(e) => { eprintln!("[hwpx] Shape::Group 직렬화 실패: {e}"); String::new() }
         };
     }
-    let (tag, c, extra_attrs, geometry) = match shape {
+    let (tag, c, drawing, extra_attrs, geometry) = match shape {
         ShapeObject::Rectangle(_) | ShapeObject::Line(_) | ShapeObject::Group(_) => {
             unreachable!()
         }
         ShapeObject::Ellipse(e) => (
             "ellipse",
             &e.common,
+            Some(&e.drawing),
             ellipse_extra_attrs(e),
             ellipse_geometry_xml(e),
         ),
         ShapeObject::Arc(a) => (
             "arc",
             &a.common,
+            Some(&a.drawing),
             format!(r#" type="{}""#, arc_kind_to_hwpx(a.arc_type)),
             arc_geometry_xml(a),
         ),
         ShapeObject::Polygon(p) => (
             "polygon",
             &p.common,
+            Some(&p.drawing),
             String::new(),
             polygon_geometry_xml(&p.points),
         ),
-        ShapeObject::Curve(cv) => ("curve", &cv.common, String::new(), curve_geometry_xml(cv)),
+        ShapeObject::Curve(cv) => (
+            "curve",
+            &cv.common,
+            Some(&cv.drawing),
+            String::new(),
+            curve_geometry_xml(cv),
+        ),
         ShapeObject::Picture(pic) => {
             return match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
                 Ok(xml) => xml,
                 Err(e) => { eprintln!("[hwpx] Shape::Picture 직렬화 실패: {e}"); String::new() }
             };
         }
-        ShapeObject::Chart(ch) => ("chart", &ch.common, String::new(), String::new()),
-        ShapeObject::Ole(o) => ("ole", &o.common, String::new(), String::new()),
+        ShapeObject::Chart(ch) => ("chart", &ch.common, None, String::new(), String::new()),
+        ShapeObject::Ole(o) => ("ole", &o.common, None, String::new(), String::new()),
     };
-    render_common_shape_xml(tag, c, &extra_attrs, &geometry)
+    // 선/채우기 (lineShape+fillBrush) — 미출력 시 재열기에서 도형이 투명해진다 (Bug B).
+    // 한컴 자식 순서 관찰값: lineShape → fillBrush → geometry.
+    let drawing_xml = match drawing {
+        Some(d) => match writer_to_string(|w| super::shape::write_drawing_attrs(w, d, ctx)) {
+            Ok(xml) => xml,
+            Err(e) => { eprintln!("[hwpx] Shape lineShape/fillBrush 직렬화 실패: {e}"); String::new() }
+        },
+        None => String::new(),
+    };
+    render_common_shape_xml(tag, c, &extra_attrs, &drawing_xml, &geometry)
 }
 
-fn render_common_shape_xml(tag: &str, c: &CommonObjAttr, extra_attrs: &str, geometry: &str) -> String {
+fn render_common_shape_xml(
+    tag: &str,
+    c: &CommonObjAttr,
+    extra_attrs: &str,
+    drawing_xml: &str,
+    geometry: &str,
+) -> String {
     format!(
         concat!(
             r#"<hp:{tag} id="{id}" zOrder="{zo}" textWrap="{tw}" textFlow="BOTH_SIDES" lock="0"{extra}>"#,
             r#"<hp:sz width="{w}" height="{h}" widthRelTo="ABSOLUTE" heightRelTo="ABSOLUTE"/>"#,
             r#"<hp:pos treatAsChar="{tac}" vertRelTo="{vr}" vertAlign="{va}" horzRelTo="{hr}" horzAlign="{ha}" vertOffset="{vo}" horzOffset="{ho}"/>"#,
             r#"<hp:outMargin left="{ml}" right="{mr}" top="{mt}" bottom="{mb}"/>"#,
+            "{drawing}",
             "{geometry}",
             r#"</hp:{tag}>"#,
         ),
@@ -506,6 +531,7 @@ fn render_common_shape_xml(tag: &str, c: &CommonObjAttr, extra_attrs: &str, geom
         ml = c.margin.left, mr = c.margin.right,
         mt = c.margin.top, mb = c.margin.bottom,
         extra = extra_attrs,
+        drawing = drawing_xml,
         geometry = geometry,
     )
 }

@@ -19,12 +19,15 @@ use quick_xml::Writer;
 
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{
-    CommonObjAttr, HorzAlign, HorzRelTo, LineShape, RectangleShape, TextBox, TextWrap,
-    VertAlign, VertRelTo,
+    CommonObjAttr, DrawingObjAttr, HorzAlign, HorzRelTo, LineShape, RectangleShape, TextBox,
+    TextWrap, VertAlign, VertRelTo,
 };
+use crate::model::style::{FillType, ShapeBorderLine};
 
 use super::context::SerializeContext;
-use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs, write_raw};
+use super::utils::{
+    color_hex, empty_tag, end_tag, start_tag, start_tag_attrs, write_fill_brush, write_raw,
+};
 use super::SerializeError;
 
 // =====================================================================
@@ -69,6 +72,11 @@ pub fn write_rect<W: Write>(
     write_pos(w, c)?;
     write_out_margin(w, c)?;
 
+    // 선/채우기 — 미출력 시 재열기에서 Default DrawingObjAttr(무테두리·무채우기)가
+    // 되어 도형이 투명해진다 (user2-152976e6.hwpx 관찰 버그).
+    // 자식 상대 순서는 한컴 관찰값(lineShape → fillBrush → drawText → pt0..pt3)을 따른다.
+    write_drawing_attrs(w, &rect.drawing, ctx)?;
+
     // drawText: 글상자 내부 문단
     if let Some(ref tb) = rect.drawing.text_box {
         if !tb.paragraphs.is_empty() {
@@ -76,7 +84,88 @@ pub fn write_rect<W: Write>(
         }
     }
 
+    // 꼭짓점 좌표 (hc:pt0..pt3) — parser(parse_shape_object)가 x_coords/y_coords 로 되읽음
+    for (i, (x, y)) in rect.x_coords.iter().zip(rect.y_coords.iter()).enumerate() {
+        let tag = format!("hc:pt{}", i);
+        let xs = x.to_string();
+        let ys = y.to_string();
+        empty_tag(w, &tag, &[("x", &xs), ("y", &ys)])?;
+    }
+
     end_tag(w, "hp:rect")?;
+    Ok(())
+}
+
+// =====================================================================
+// <hp:lineShape> + <hc:fillBrush> — 도형 공통 선/채우기
+// =====================================================================
+
+/// `<hp:lineShape>` 직렬화 — parser(`parse_line_shape_attr`)가 읽는
+/// color/width/style/outlineStyle 을 IR 에서 역산. 나머지 속성은 한컴 관찰
+/// 기본값(endCap FLAT, head/tail NORMAL 등)으로 채운다 (parser 미소비).
+pub(crate) fn write_line_shape<W: Write>(
+    w: &mut Writer<W>,
+    bl: &ShapeBorderLine,
+) -> Result<(), SerializeError> {
+    let color = color_hex(bl.color);
+    let width = bl.width.to_string();
+    // attr bit 0-5 = 선 종류 (HWP5 는 bit 6+ 에 endCap/화살표가 실리므로 0x3F 마스크)
+    let style = line_style_str((bl.attr & 0x3F) as u8);
+    let outline = match bl.outline_style {
+        1 => "OUTER",
+        2 => "INNER",
+        _ => "NORMAL",
+    };
+    empty_tag(
+        w,
+        "hp:lineShape",
+        &[
+            ("color", &color),
+            ("width", &width),
+            ("style", style),
+            ("endCap", "FLAT"),
+            ("headStyle", "NORMAL"),
+            ("tailStyle", "NORMAL"),
+            ("headfill", "1"),
+            ("tailfill", "1"),
+            ("headSz", "SMALL_SMALL"),
+            ("tailSz", "SMALL_SMALL"),
+            ("outlineStyle", outline),
+            ("alpha", "0"),
+        ],
+    )
+}
+
+/// 선 종류 코드 → OWPML 문자열. parser(`parse_line_shape_attr`)의 역함수.
+fn line_style_str(v: u8) -> &'static str {
+    match v {
+        0 => "NONE",
+        1 => "SOLID",
+        2 => "DASH",
+        3 => "DOT",
+        4 => "DASH_DOT",
+        5 => "DASH_DOT_DOT",
+        6 => "LONG_DASH",
+        7 => "CIRCLE",
+        8 => "DOUBLE_SLIM",
+        9 => "SLIM_THICK",
+        10 => "THICK_SLIM",
+        11 => "SLIM_THICK_SLIM",
+        _ => "SOLID",
+    }
+}
+
+/// 도형 공통 선(lineShape) + 채우기(fillBrush) 출력.
+/// fillBrush 는 채우기가 있을 때만 (write_border_fill 과 동일 규칙).
+pub(crate) fn write_drawing_attrs<W: Write>(
+    w: &mut Writer<W>,
+    drawing: &DrawingObjAttr,
+    ctx: &SerializeContext,
+) -> Result<(), SerializeError> {
+    write_line_shape(w, &drawing.border_line)?;
+    if !matches!(drawing.fill.fill_type, FillType::None) {
+        write_fill_brush(w, &drawing.fill, ctx)?;
+    }
     Ok(())
 }
 
@@ -85,7 +174,12 @@ pub fn write_rect<W: Write>(
 // =====================================================================
 
 /// `<hp:line>` 직렬화 진입점. LineShape IR → XML.
-pub fn write_line<W: Write>(w: &mut Writer<W>, line: &LineShape) -> Result<(), SerializeError> {
+/// `ctx` 는 fillBrush(imgBrush binaryItemIDRef) 해석에 사용.
+pub fn write_line<W: Write>(
+    w: &mut Writer<W>,
+    line: &LineShape,
+    ctx: &SerializeContext,
+) -> Result<(), SerializeError> {
     let c = &line.common;
     let id_str = c.instance_id.to_string();
     let z_order = c.z_order.to_string();
@@ -121,6 +215,9 @@ pub fn write_line<W: Write>(w: &mut Writer<W>, line: &LineShape) -> Result<(), S
     write_sz(w, c)?;
     write_pos(w, c)?;
     write_out_margin(w, c)?;
+
+    // 선/채우기 — rect 와 동일한 재열기 투명화 방지 (Bug B)
+    write_drawing_attrs(w, &line.drawing, ctx)?;
 
     end_tag(w, "hp:line")?;
     Ok(())
@@ -405,8 +502,10 @@ mod tests {
     }
 
     fn serialize_line(line: &LineShape) -> String {
+        let doc = crate::model::document::Document::default();
+        let ctx = SerializeContext::collect_from_document(&doc);
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
-        write_line(&mut w, line).expect("write_line");
+        write_line(&mut w, line, &ctx).expect("write_line");
         String::from_utf8(w.into_inner()).unwrap()
     }
 
@@ -449,6 +548,248 @@ mod tests {
         assert!(xml.contains("<hp:sz "));
         assert!(xml.contains("<hp:pos "));
         assert!(xml.contains("<hp:outMargin "));
+    }
+
+    // ---------------------------------------------------------------
+    // lineShape / fillBrush / 꼭짓점 직렬화 — 저장 후 재열기 시 도형이
+    // 투명(테두리·채우기 없음)이 되던 버그 (user2-152976e6.hwpx 관찰)
+    // ---------------------------------------------------------------
+
+    /// 테두리+채우기 있는 도형 IR 생성 헬퍼.
+    fn styled_drawing() -> crate::model::shape::DrawingObjAttr {
+        use crate::model::shape::DrawingObjAttr;
+        use crate::model::style::{Fill, FillType, ShapeBorderLine, SolidFill};
+        DrawingObjAttr {
+            border_line: ShapeBorderLine {
+                color: 0x000000FF, // COLORREF(0x00BBGGRR) = 빨강 → "#FF0000"
+                width: 40,
+                attr: 2, // DASH
+                outline_style: 0,
+            },
+            fill: Fill {
+                fill_type: FillType::Solid,
+                solid: Some(SolidFill {
+                    background_color: 0x00F0B000, // COLORREF = "#00B0F0"
+                    pattern_color: 0,
+                    pattern_type: -1,
+                }),
+                gradient: None,
+                image: None,
+                alpha: 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rect_emits_line_shape_fill_brush_and_corner_points() {
+        let mut rect = RectangleShape::default();
+        rect.common.width = 11699;
+        rect.common.height = 7801;
+        rect.drawing = styled_drawing();
+        rect.x_coords = [0, 11699, 11699, 0];
+        rect.y_coords = [0, 0, 7801, 7801];
+
+        let xml = serialize_rect(&rect);
+        assert!(
+            xml.contains(r##"<hp:lineShape color="#FF0000" width="40" style="DASH""##),
+            "rect must serialize its stroke (lineShape): {xml}"
+        );
+        assert!(
+            xml.contains(r##"<hc:fillBrush><hc:winBrush faceColor="#00B0F0""##),
+            "rect must serialize its fill (fillBrush/winBrush): {xml}"
+        );
+        assert!(xml.contains(r#"<hc:pt0 x="0" y="0"/>"#), "pt0: {xml}");
+        assert!(xml.contains(r#"<hc:pt1 x="11699" y="0"/>"#), "pt1: {xml}");
+        assert!(xml.contains(r#"<hc:pt2 x="11699" y="7801"/>"#), "pt2: {xml}");
+        assert!(xml.contains(r#"<hc:pt3 x="0" y="7801"/>"#), "pt3: {xml}");
+    }
+
+    /// 라운드트립 도우미 — 단일 도형 컨트롤 문서 생성.
+    fn doc_with_shape(shape: crate::model::shape::ShapeObject) -> crate::model::document::Document {
+        use crate::model::control::Control;
+        use crate::model::document::Document;
+
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        let mut section = crate::model::document::Section::default();
+        let mut para = Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls.push(Control::Shape(Box::new(shape)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+        doc
+    }
+
+    /// 라운드트립된 문서에서 첫 도형을 꺼낸다.
+    fn first_shape(doc: &crate::model::document::Document) -> &crate::model::shape::ShapeObject {
+        use crate::model::control::Control;
+        doc.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Shape(s) => Some(s.as_ref()),
+                _ => None,
+            })
+            .expect("shape must survive roundtrip")
+    }
+
+    fn assert_drawing_survives(d: &crate::model::shape::DrawingObjAttr, kind: &str) {
+        use crate::model::style::FillType;
+        assert_eq!(d.border_line.color, 0x000000FF, "{kind}: border color must survive");
+        assert_eq!(d.border_line.width, 40, "{kind}: border width must survive");
+        assert_eq!(d.border_line.attr & 0xFF, 2, "{kind}: border style (DASH) must survive");
+        assert_eq!(d.fill.fill_type, FillType::Solid, "{kind}: fill type must survive");
+        let solid = d.fill.solid.as_ref().expect("solid fill must survive");
+        assert_eq!(solid.background_color, 0x00F0B000, "{kind}: fill color must survive");
+    }
+
+    /// 사각형: 테두리+채우기+꼭짓점이 serialize → parse 라운드트립에서 보존돼야 한다.
+    #[test]
+    fn rect_border_fill_and_points_roundtrip_through_hwpx() {
+        use crate::model::shape::ShapeObject;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut rect = RectangleShape::default();
+        rect.common.width = 11699;
+        rect.common.height = 7801;
+        rect.drawing = styled_drawing();
+        rect.x_coords = [0, 11699, 11699, 0];
+        rect.y_coords = [0, 0, 7801, 7801];
+
+        let doc = doc_with_shape(ShapeObject::Rectangle(rect));
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let rect = match first_shape(&parsed) {
+            ShapeObject::Rectangle(r) => r,
+            other => panic!("expected rect, got {}", other.shape_name()),
+        };
+        assert_drawing_survives(&rect.drawing, "rect");
+        assert_eq!(rect.x_coords, [0, 11699, 11699, 0], "corner x coords must survive");
+        assert_eq!(rect.y_coords, [0, 0, 7801, 7801], "corner y coords must survive");
+    }
+
+    /// 직선: 테두리(선 색/굵기/스타일)가 라운드트립에서 보존돼야 한다.
+    #[test]
+    fn line_border_roundtrips_through_hwpx() {
+        use crate::model::shape::ShapeObject;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut line = LineShape::default();
+        line.common.width = 10000;
+        line.common.height = 0;
+        line.start = Point { x: 0, y: 0 };
+        line.end = Point { x: 10000, y: 0 };
+        line.drawing = styled_drawing();
+
+        let doc = doc_with_shape(ShapeObject::Line(line));
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let line = match first_shape(&parsed) {
+            ShapeObject::Line(l) => l,
+            other => panic!("expected line, got {}", other.shape_name()),
+        };
+        assert_drawing_survives(&line.drawing, "line");
+    }
+
+    /// 타원/다각형 (render_common_shape_xml 경로): 테두리+채우기 보존.
+    #[test]
+    fn ellipse_and_polygon_border_fill_roundtrip_through_hwpx() {
+        use crate::model::shape::{EllipseShape, PolygonShape, ShapeObject};
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut ellipse = EllipseShape::default();
+        ellipse.common.width = 5000;
+        ellipse.common.height = 3000;
+        ellipse.center = Point { x: 2500, y: 1500 };
+        ellipse.axis1 = Point { x: 5000, y: 1500 };
+        ellipse.axis2 = Point { x: 2500, y: 3000 };
+        ellipse.drawing = styled_drawing();
+
+        let doc = doc_with_shape(ShapeObject::Ellipse(ellipse));
+        let bytes = serialize_hwpx(&doc).expect("serialize ellipse");
+        let parsed = parse_hwpx(&bytes).expect("parse ellipse back");
+        match first_shape(&parsed) {
+            ShapeObject::Ellipse(e) => assert_drawing_survives(&e.drawing, "ellipse"),
+            other => panic!("expected ellipse, got {}", other.shape_name()),
+        }
+
+        let mut poly = PolygonShape::default();
+        poly.common.width = 4000;
+        poly.common.height = 2000;
+        poly.points = vec![
+            Point { x: 0, y: 0 },
+            Point { x: 4000, y: 0 },
+            Point { x: 2000, y: 2000 },
+        ];
+        poly.drawing = styled_drawing();
+
+        let doc = doc_with_shape(ShapeObject::Polygon(poly));
+        let bytes = serialize_hwpx(&doc).expect("serialize polygon");
+        let parsed = parse_hwpx(&bytes).expect("parse polygon back");
+        match first_shape(&parsed) {
+            ShapeObject::Polygon(p) => {
+                assert_drawing_survives(&p.drawing, "polygon");
+                assert_eq!(p.points.len(), 3, "polygon points must survive");
+            }
+            other => panic!("expected polygon, got {}", other.shape_name()),
+        }
+    }
+
+    /// 골든 핀 — 실제 한컴 샘플(tac-img-02.hwpx) 도형의 lineShape 속성이
+    /// parse → serialize 후에도 XML 에 남아 있어야 한다.
+    /// 관찰값 (section0.xml): <hp:lineShape color="#000000" width="33" style="SOLID" .../>
+    /// + <hc:fillBrush><hc:winBrush faceColor="#FFFFFF" .../>
+    #[test]
+    fn golden_sample_rect_line_shape_survives_export() {
+        use crate::model::control::Control;
+        use crate::model::shape::ShapeObject;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let bytes = include_bytes!("../../../samples/tac-img-02.hwpx");
+        let doc = parse_hwpx(bytes).expect("parse tac-img-02");
+
+        // 파서는 이미 lineShape 를 읽는다 — width=33 SOLID 사각형이 존재해야 함
+        fn find_rect_w33(shape: &ShapeObject) -> bool {
+            match shape {
+                ShapeObject::Rectangle(r) => {
+                    r.drawing.border_line.width == 33 && r.drawing.border_line.attr & 0xFF == 1
+                }
+                ShapeObject::Group(g) => g.children.iter().any(find_rect_w33),
+                _ => false,
+            }
+        }
+        let found = doc.sections.iter().flat_map(|s| &s.paragraphs).any(|p| {
+            p.controls.iter().any(|c| match c {
+                Control::Shape(s) => find_rect_w33(s),
+                _ => false,
+            })
+        });
+        assert!(found, "tac-img-02 must contain the observed width=33 SOLID rect");
+
+        // 재직렬화 시 그 속성이 XML 로 남아야 한다
+        let out = serialize_hwpx(&doc).expect("serialize");
+        let cursor = std::io::Cursor::new(&out);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        assert!(
+            xml.contains(r##"<hp:lineShape color="#000000" width="33" style="SOLID""##),
+            "golden lineShape attrs must be exported"
+        );
+        assert!(
+            xml.contains(r##"<hc:winBrush faceColor="#FFFFFF""##),
+            "golden fillBrush winBrush must be exported"
+        );
     }
 
     // ---------------------------------------------------------------
