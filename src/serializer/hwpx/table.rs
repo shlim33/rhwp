@@ -315,24 +315,13 @@ fn write_sub_list<W: Write>(
             write_cell_paragraph_runs(w, para)?;
         }
 
-        // <hp:linesegarray> 최소 1개 lineseg
-        start_tag(w, "hp:linesegarray")?;
-        empty_tag(
+        // <hp:linesegarray> — IR 실측 lineseg 만 그대로 출력, 없으면 통째 생략.
+        // (조작된 vertsize=1000 단일 stub 는 다중행 셀 문단을 한 줄 높이로
+        //  클리핑시켰다. 한컴은 부재를 허용하고 열 때 재계산한다.)
+        write_raw(
             w,
-            "hp:lineseg",
-            &[
-                ("textpos", "0"),
-                ("vertpos", "0"),
-                ("vertsize", "1000"),
-                ("textheight", "1000"),
-                ("baseline", "850"),
-                ("spacing", "600"),
-                ("horzpos", "0"),
-                ("horzsize", "12964"),
-                ("flags", "393216"),
-            ],
+            &super::section::render_linesegarray_verbatim_or_omit(&para.line_segs),
         )?;
-        end_tag(w, "hp:linesegarray")?;
 
         end_tag(w, "hp:p")?;
     }
@@ -571,6 +560,94 @@ mod tests {
         assert!(
             xml.contains(r#"<hp:run charPrIDRef="6"><hp:t>b</hp:t></hp:run>"#),
             "cell second span must use char shape 6: {}",
+            xml
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 셀 문단 lineseg — 조작된 stub(vertsize=1000 단일 lineseg) 금지.
+    // 한컴 원본 관찰: 여러 줄 셀 문단은 linesegarray 가 아예 없거나(재계산 위임)
+    // 실측 lineseg 들을 가진다. IR 에 실측값이 있으면 그대로, 없으면 생략한다.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cell_paragraph_emits_ir_linesegs_verbatim() {
+        use crate::model::paragraph::LineSeg;
+        let mut t = empty_table(1, 1);
+        let para = &mut t.cells[0].paragraphs[0];
+        para.text = "여러 줄 셀 문단".to_string();
+        para.line_segs = vec![
+            LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height: 1000,
+                text_height: 1000,
+                baseline_distance: 850,
+                line_spacing: 660,
+                column_start: 0,
+                segment_width: 42035,
+                tag: 2490368,
+            },
+            LineSeg {
+                text_start: 23,
+                vertical_pos: 1660,
+                line_height: 1000,
+                text_height: 1000,
+                baseline_distance: 850,
+                line_spacing: 660,
+                column_start: 0,
+                segment_width: 42035,
+                tag: 1441792,
+            },
+        ];
+        let xml = serialize(&t);
+        assert_eq!(
+            xml.matches("<hp:lineseg ").count(),
+            2,
+            "IR 의 lineseg 2개가 그대로 나와야 한다 (stub 1개 금지): {}",
+            xml
+        );
+        assert!(
+            xml.contains(
+                r#"<hp:lineseg textpos="23" vertpos="1660" vertsize="1000" textheight="1000" baseline="850" spacing="660" horzpos="0" horzsize="42035" flags="1441792"/>"#
+            ),
+            "두 번째 lineseg 는 IR 값 그대로여야 한다: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn cell_paragraph_without_linesegs_omits_linesegarray() {
+        // Paragraph::default() → line_segs 없음.
+        // 한컴 원본(예: 사용자 증거 파일의 115자 다중행 셀 문단)은 linesegarray 를
+        // 아예 갖지 않는다 — 없으면 조작하지 말고 통째로 생략한다.
+        let t = empty_table(1, 1);
+        let xml = serialize(&t);
+        assert!(
+            !xml.contains("<hp:linesegarray"),
+            "IR 에 lineseg 가 없으면 linesegarray 를 생략해야 한다: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn cell_paragraph_with_parser_fallback_lineseg_omits_linesegarray() {
+        // HWPX 파서는 linesegarray 부재 시 all-zero + tag=0x00060000 기본 lineseg 를
+        // 주입한다 (parse_paragraph). 이는 원본에 없던 값이므로 다시 내보낼 때는
+        // 생략해야 한다 (vertsize=0 을 내보내면 한컴에서 셀이 클리핑된다).
+        use crate::model::paragraph::LineSeg;
+        let mut t = empty_table(1, 1);
+        let para = &mut t.cells[0].paragraphs[0];
+        para.text = "다중행 텍스트".to_string();
+        para.line_segs = vec![LineSeg {
+            text_start: 0,
+            tag: 0x0006_0000,
+            ..Default::default()
+        }];
+        let xml = serialize(&t);
+        assert!(
+            !xml.contains("<hp:linesegarray"),
+            "파서 주입 기본 lineseg 는 실측값이 아니므로 생략해야 한다: {}",
             xml
         );
     }

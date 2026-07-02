@@ -81,6 +81,8 @@ pub struct SerializeContext {
     pub style_ids: IdPool<u16>,
     /// `bin_data_id` (IR) → manifest 엔트리 매핑
     pub bin_data_map: HashMap<u16, BinDataEntry>,
+    /// 머리말/꼬리말 `<hp:header>/<hp:footer>` 의 `id` 속성 시퀀스 (1부터 발급).
+    header_footer_seq: u32,
 }
 
 impl SerializeContext {
@@ -155,6 +157,12 @@ impl SerializeContext {
         self.bin_data_map.get(&bin_data_id).map(|e| e.manifest_id.as_str())
     }
 
+    /// 머리말/꼬리말 요소 `id` 속성값 발급 (1, 2, ... — 한컴 원본 관찰: id="1").
+    pub fn next_header_footer_id(&mut self) -> u32 {
+        self.header_footer_seq += 1;
+        self.header_footer_seq
+    }
+
     /// 모든 참조가 해소되었는지 단언. 해소되지 않은 ID가 있으면 `SerializeError::XmlError` 반환.
     pub fn assert_all_refs_resolved(&self) -> Result<(), SerializeError> {
         let mut missing: Vec<String> = Vec::new();
@@ -220,6 +228,21 @@ fn register_control_border_fills(ctx: &mut SerializeContext, ctrl: &Control) {
                             register_control_border_fills(ctx, nested);
                         }
                     }
+                }
+            }
+        }
+        // 머리말/꼬리말 문단 내부의 표/글상자도 직렬화되므로 재귀 등록.
+        Control::Header(h) => {
+            for para in &h.paragraphs {
+                for nested in &para.controls {
+                    register_control_border_fills(ctx, nested);
+                }
+            }
+        }
+        Control::Footer(f) => {
+            for para in &f.paragraphs {
+                for nested in &para.controls {
+                    register_control_border_fills(ctx, nested);
                 }
             }
         }

@@ -429,3 +429,54 @@ fn task177_false_positive_measurement() {
     // assertion 없음 — 측정 결과는 기술문서에 기록
 }
 
+
+// ---------- 머리말/꼬리말 (hp:header / hp:footer) export 보존 ------------------
+// export 시 hp:header 가 통째로 드롭되던 버그의 회귀 가드.
+// in-repo 한컴 원본 samples/hwpx/mel-001.hwpx 는 hp:header 를 포함한다.
+
+fn count_headers_footers(doc: &rhwp::model::document::Document) -> (usize, usize) {
+    let mut headers = 0usize;
+    let mut footers = 0usize;
+    for sec in &doc.sections {
+        for para in &sec.paragraphs {
+            for ctrl in &para.controls {
+                match ctrl {
+                    rhwp::model::control::Control::Header(_) => headers += 1,
+                    rhwp::model::control::Control::Footer(_) => footers += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (headers, footers)
+}
+
+#[test]
+fn header_survives_hwpx_export_mel001() {
+    let bytes = include_bytes!("../samples/hwpx/mel-001.hwpx");
+    let doc1 = rhwp::parser::hwpx::parse_hwpx(bytes).expect("parse mel-001");
+    let (h1, _) = count_headers_footers(&doc1);
+    assert!(h1 > 0, "mel-001.hwpx 원본에는 hp:header 가 있어야 한다");
+
+    let out = rhwp::serializer::hwpx::serialize_hwpx(&doc1).expect("serialize mel-001");
+    let doc2 = rhwp::parser::hwpx::parse_hwpx(&out).expect("re-parse mel-001 export");
+    let (h2, _) = count_headers_footers(&doc2);
+    assert_eq!(h2, h1, "export 후에도 hp:header 개수가 보존돼야 한다 (드롭 금지)");
+
+    // 골든 형태 핀 — 한컴 원본(mel-001) 관찰 요소/속성명이 export XML 에도 나와야 한다.
+    let xml = extract_section0(&out);
+    assert!(
+        xml.contains("<hp:ctrl><hp:header id=") && xml.contains(r#"applyPageType="BOTH""#),
+        "export 된 section0.xml 은 <hp:ctrl><hp:header id=.. applyPageType=..> 형태여야 한다"
+    );
+}
+
+/// export 된 HWPX ZIP 에서 Contents/section0.xml 텍스트를 꺼낸다.
+fn extract_section0(hwpx_bytes: &[u8]) -> String {
+    let reader = std::io::Cursor::new(hwpx_bytes);
+    let mut zip = zip::ZipArchive::new(reader).expect("zip open");
+    let mut file = zip.by_name("Contents/section0.xml").expect("section0.xml");
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut file, &mut s).expect("read section0");
+    s
+}

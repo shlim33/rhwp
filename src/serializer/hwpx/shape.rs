@@ -26,7 +26,7 @@ use crate::model::style::{FillType, ShapeBorderLine};
 
 use super::context::SerializeContext;
 use super::utils::{
-    color_hex, empty_tag, end_tag, start_tag, start_tag_attrs, write_fill_brush, write_raw,
+    color_hex, empty_tag, end_tag, start_tag_attrs, write_fill_brush, write_raw,
 };
 use super::SerializeError;
 
@@ -352,24 +352,12 @@ fn write_draw_text_paragraph<W: Write>(
 
     end_tag(w, "hp:run")?;
 
-    // minimal lineseg
-    start_tag(w, "hp:linesegarray")?;
-    empty_tag(
+    // <hp:linesegarray> — IR 실측 lineseg 만 그대로 출력, 없으면 통째 생략
+    // (셀 문단과 동일 원칙 — 조작된 단일 stub 는 다중행 글상자를 클리핑시킨다).
+    write_raw(
         w,
-        "hp:lineseg",
-        &[
-            ("textpos", "0"),
-            ("vertpos", "0"),
-            ("vertsize", "1000"),
-            ("textheight", "1000"),
-            ("baseline", "850"),
-            ("spacing", "600"),
-            ("horzpos", "0"),
-            ("horzsize", "42520"),
-            ("flags", "393216"),
-        ],
+        &super::section::render_linesegarray_verbatim_or_omit(&p.line_segs),
     )?;
-    end_tag(w, "hp:linesegarray")?;
 
     end_tag(w, "hp:p")?;
     Ok(())
@@ -548,6 +536,98 @@ mod tests {
         assert!(xml.contains("<hp:sz "));
         assert!(xml.contains("<hp:pos "));
         assert!(xml.contains("<hp:outMargin "));
+    }
+
+    // ---------------------------------------------------------------
+    // 글상자(drawText) 문단 lineseg — 셀 문단과 동일한 원칙.
+    // IR 에 실측 lineseg 가 있으면 그대로, 없으면 linesegarray 통째 생략
+    // (조작된 vertsize=1000 단일 stub 금지 — 재열기 시 다중행 클리핑).
+    // ---------------------------------------------------------------
+
+    fn rect_with_text_box_paragraph(p: crate::model::paragraph::Paragraph) -> RectangleShape {
+        use crate::model::shape::TextBox;
+        let mut rect = RectangleShape::default();
+        rect.drawing.text_box = Some(TextBox {
+            paragraphs: vec![p],
+            ..Default::default()
+        });
+        rect
+    }
+
+    #[test]
+    fn draw_text_paragraph_emits_ir_linesegs_verbatim() {
+        use crate::model::paragraph::{LineSeg, Paragraph};
+        let mut p = Paragraph::default();
+        p.text = "여러 줄 글상자".to_string();
+        p.line_segs = vec![
+            LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height: 1100,
+                text_height: 1000,
+                baseline_distance: 850,
+                line_spacing: 550,
+                column_start: 0,
+                segment_width: 30000,
+                tag: 2490368,
+            },
+            LineSeg {
+                text_start: 14,
+                vertical_pos: 1650,
+                line_height: 1100,
+                text_height: 1000,
+                baseline_distance: 850,
+                line_spacing: 550,
+                column_start: 0,
+                segment_width: 30000,
+                tag: 1441792,
+            },
+        ];
+        let xml = serialize_rect(&rect_with_text_box_paragraph(p));
+        assert_eq!(
+            xml.matches("<hp:lineseg ").count(),
+            2,
+            "drawText 문단은 IR lineseg 2개를 그대로 내보내야 한다: {}",
+            xml
+        );
+        assert!(
+            xml.contains(
+                r#"<hp:lineseg textpos="14" vertpos="1650" vertsize="1100" textheight="1000" baseline="850" spacing="550" horzpos="0" horzsize="30000" flags="1441792"/>"#
+            ),
+            "두 번째 lineseg 는 IR 값 그대로여야 한다: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn draw_text_paragraph_without_linesegs_omits_linesegarray() {
+        use crate::model::paragraph::Paragraph;
+        let mut p = Paragraph::default();
+        p.text = "글상자".to_string();
+        let xml = serialize_rect(&rect_with_text_box_paragraph(p));
+        assert!(
+            !xml.contains("<hp:linesegarray"),
+            "IR 에 lineseg 가 없으면 drawText 문단도 linesegarray 를 생략해야 한다: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn draw_text_paragraph_with_parser_fallback_lineseg_omits_linesegarray() {
+        use crate::model::paragraph::{LineSeg, Paragraph};
+        let mut p = Paragraph::default();
+        p.text = "글상자".to_string();
+        p.line_segs = vec![LineSeg {
+            text_start: 0,
+            tag: 0x0006_0000,
+            ..Default::default()
+        }];
+        let xml = serialize_rect(&rect_with_text_box_paragraph(p));
+        assert!(
+            !xml.contains("<hp:linesegarray"),
+            "파서 주입 기본 lineseg 는 생략해야 한다: {}",
+            xml
+        );
     }
 
     // ---------------------------------------------------------------

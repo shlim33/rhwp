@@ -23,6 +23,7 @@ use quick_xml::Writer;
 
 use crate::model::control::{Control, Equation};
 use crate::model::footnote::{Footnote, Endnote};
+use crate::model::header_footer::HeaderFooterApply;
 use crate::model::document::{Document, Section};
 use crate::model::page::PageDef;
 use crate::model::paragraph::{ColumnBreakType, LineSeg, Paragraph};
@@ -365,6 +366,8 @@ pub(super) fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Form(_)
             | Control::Footnote(_)
             | Control::Endnote(_)
+            | Control::Header(_)
+            | Control::Footer(_)
     )
 }
 
@@ -400,6 +403,12 @@ fn render_control_slot(out: &mut String, control: &Control, ctx: &mut SerializeC
         }
         Control::Endnote(note) => {
             out.push_str(&render_endnote(note, ctx));
+        }
+        Control::Header(h) => {
+            out.push_str(&render_header_footer_ctrl("header", h.apply_to, &h.paragraphs, ctx));
+        }
+        Control::Footer(f) => {
+            out.push_str(&render_header_footer_ctrl("footer", f.apply_to, &f.paragraphs, ctx));
         }
         _ => {}
     }
@@ -633,6 +642,50 @@ fn render_note_sublist(tag: &str, number: u16, paragraphs: &[Paragraph], ctx: &m
     out
 }
 
+/// applyPageType — 파서 `parse_apply_page_type` 의 역.
+fn apply_page_type_to_hwpx(a: HeaderFooterApply) -> &'static str {
+    match a {
+        HeaderFooterApply::Both => "BOTH",
+        HeaderFooterApply::Even => "EVEN",
+        HeaderFooterApply::Odd => "ODD",
+    }
+}
+
+/// 머리말/꼬리말 직렬화 — `<hp:ctrl><hp:header id=".." applyPageType=".."><hp:subList ...>`.
+///
+/// 형태는 한컴 원본 관찰값 (samples/hwpx/mel-001.hwpx, samples/table-vpos-01.hwpx):
+/// run 안 `<hp:ctrl>` 에 위치하며 footnote(render_note_sublist)와 동일한 subList 구조.
+/// 문단 콘텐츠는 controls-aware 공유 writer(render_run_content)로 emit 하여
+/// 머리말 안 그림/표도 살아남는다.
+///
+/// linesegarray 는 IR 실측값이 있을 때만 그대로 출력하고, 없으면 통째로 생략한다
+/// (한컴 원본 머리말 문단도 linesegarray 없이 저장되는 경우가 있음 — 한컴이 재계산).
+fn render_header_footer_ctrl(
+    tag: &str,
+    apply: HeaderFooterApply,
+    paragraphs: &[Paragraph],
+    ctx: &mut SerializeContext,
+) -> String {
+    let id = ctx.next_header_footer_id();
+    let mut out = format!(
+        r#"<hp:ctrl><hp:{tag} id="{id}" applyPageType="{apply}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#,
+        tag = tag,
+        id = id,
+        apply = apply_page_type_to_hwpx(apply),
+    );
+    for (idx, p) in paragraphs.iter().enumerate() {
+        let cs = first_run_char_shape_id(p);
+        out.push_str(&render_hp_p_open(p, idx as u32));
+        out.push_str(&format!(r#"<hp:run charPrIDRef="{}">"#, cs));
+        out.push_str(&render_run_content(p, ctx));
+        out.push_str("</hp:run>");
+        out.push_str(&render_linesegarray_verbatim_or_omit(&p.line_segs));
+        out.push_str("</hp:p>");
+    }
+    out.push_str(&format!("</hp:subList></hp:{tag}></hp:ctrl>", tag = tag));
+    out
+}
+
 fn render_footnote(note: &Footnote, ctx: &mut SerializeContext) -> String {
     render_note_sublist("footNote", note.number, &note.paragraphs, ctx)
 }
@@ -767,6 +820,44 @@ fn render_lineseg_array_from_ir(segs: &[LineSeg]) -> String {
         ));
     }
     out
+}
+
+/// HWPX 파서가 linesegarray 부재 시 주입하는 기본 lineseg 인지 판별
+/// (parser::hwpx `parse_paragraph`: all-zero + tag=0x00060000).
+///
+/// 원본 파일에 없던 값이므로 다시 내보낼 때 실측값으로 취급하면 안 된다
+/// (vertsize=0 을 내보내면 한컴에서 해당 문단이 클리핑된다).
+pub(super) fn is_parser_fallback_lineseg(segs: &[LineSeg]) -> bool {
+    match segs {
+        [s] => {
+            s.text_start == 0
+                && s.vertical_pos == 0
+                && s.line_height == 0
+                && s.text_height == 0
+                && s.baseline_distance == 0
+                && s.line_spacing == 0
+                && s.column_start == 0
+                && s.segment_width == 0
+                && s.tag == 0x0006_0000
+        }
+        _ => false,
+    }
+}
+
+/// 셀/글상자/머리말 문단용 `<hp:linesegarray>` — IR 실측 lineseg 가 있으면 그대로
+/// 출력하고, 없으면(또는 파서 주입 기본값뿐이면) 통째로 생략한다.
+///
+/// 한컴은 linesegarray 부재를 허용하며 열 때 재계산한다 (사용자 증거 파일의
+/// 다중행 셀 문단도 원본에는 linesegarray 가 없음). **조작된 stub 생산 금지** —
+/// vertsize=1000 단일 stub 는 다중행 셀을 한 줄 높이로 클리핑시킨다.
+pub(super) fn render_linesegarray_verbatim_or_omit(segs: &[LineSeg]) -> String {
+    if segs.is_empty() || is_parser_fallback_lineseg(segs) {
+        return String::new();
+    }
+    format!(
+        "<hp:linesegarray>{}</hp:linesegarray>",
+        render_lineseg_array_from_ir(segs)
+    )
 }
 
 /// IR 기반 다음 문단의 vert_start 계산 — 마지막 lineseg 의 vpos + lh 사용.
@@ -1117,5 +1208,202 @@ mod tests {
         // IR 에 1개만 있으므로 lineseg 도 1개만 출력 (rhwp 는 원본 보존)
         assert_eq!(xml.matches("<hp:lineseg ").count(), 1);
         assert!(xml.contains(r#"vertsize="2000""#), "IR value 2000 must be used, not fallback 1000");
+    }
+
+    // ---------------------------------------------------------------
+    // 머리말/꼬리말 (hp:header / hp:footer) 직렬화 — export 시 통째로
+    // 드롭되던 버그. 골든 형태는 in-repo 한컴 원본 관찰값
+    // (samples/hwpx/mel-001.hwpx, samples/table-vpos-01.hwpx):
+    //   <hp:ctrl><hp:header id="1" applyPageType="BOTH">
+    //     <hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK"
+    //       vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0"
+    //       textWidth=".." textHeight=".." hasTextRef="0" hasNumRef="0">
+    //       <hp:p ...>...</hp:p>
+    //     </hp:subList></hp:header></hp:ctrl>
+    // (run 안 <hp:ctrl> 에 위치 — footnote 와 동일한 슬롯 기계.)
+    // ---------------------------------------------------------------
+
+    use crate::model::header_footer::{Footer, Header, HeaderFooterApply};
+
+    fn text_paragraph(s: &str) -> Paragraph {
+        let mut p = Paragraph::default();
+        p.text = s.to_string();
+        p
+    }
+
+    #[test]
+    fn header_control_emits_hancom_golden_shape() {
+        let header = Header {
+            paragraphs: vec![text_paragraph("머리말 텍스트")],
+            ..Default::default()
+        };
+        let mut para = text_paragraph("body");
+        para.controls.push(crate::model::control::Control::Header(Box::new(header)));
+        let (doc, section) = make_doc_with_paragraph(para);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(
+            xml.contains(r#"<hp:ctrl><hp:header id="1" applyPageType="BOTH">"#),
+            "hp:header 는 hp:ctrl 로 감싸고 id + applyPageType 속성을 가져야 한다 (mel-001 관찰): {}",
+            xml
+        );
+        assert!(
+            xml.contains(
+                r#"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#
+            ),
+            "hp:header 내부 subList 는 한컴 관찰 속성 세트를 가져야 한다: {}",
+            xml
+        );
+        assert!(xml.contains("머리말 텍스트"), "머리말 문단 텍스트가 나와야 한다: {}", xml);
+        assert!(
+            xml.contains("</hp:subList></hp:header></hp:ctrl>"),
+            "닫힘 순서 subList → header → ctrl: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn footer_control_emits_apply_page_type() {
+        let footer = Footer {
+            apply_to: HeaderFooterApply::Odd,
+            paragraphs: vec![text_paragraph("꼬리말")],
+            ..Default::default()
+        };
+        let mut para = text_paragraph("body");
+        para.controls.push(crate::model::control::Control::Footer(Box::new(footer)));
+        let (doc, section) = make_doc_with_paragraph(para);
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let xml = String::from_utf8(write_section(&section, &doc, 0, &mut ctx).unwrap()).unwrap();
+        assert!(
+            xml.contains(r#"applyPageType="ODD""#) && xml.contains("<hp:footer "),
+            "hp:footer 에 applyPageType=ODD 가 나와야 한다: {}",
+            xml
+        );
+        assert!(xml.contains("꼬리말"), "꼬리말 문단 텍스트가 나와야 한다: {}", xml);
+        assert!(
+            xml.contains("</hp:subList></hp:footer></hp:ctrl>"),
+            "닫힘 순서 subList → footer → ctrl: {}",
+            xml
+        );
+    }
+
+    #[test]
+    fn header_with_text_and_picture_roundtrips_through_hwpx() {
+        use crate::model::bin_data::BinDataContent;
+        use crate::model::control::Control;
+        use crate::model::image::{ImageAttr, Picture};
+        use crate::model::shape::CommonObjAttr;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let fake_png = b"\x89PNG\r\n\x1a\nfake_header_image";
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        doc.doc_info.border_fills.push(Default::default());
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: fake_png.to_vec(),
+            extension: "png".to_string(),
+        });
+
+        // 머리말: 텍스트 문단 + 그림을 담은 문단 (그림 슬롯 8 유닛 뒤 'A')
+        let mut pic_para = text_paragraph("A");
+        pic_para.char_offsets = vec![8];
+        pic_para.char_count = 10;
+        pic_para.controls.push(Control::Picture(Box::new(Picture {
+            common: CommonObjAttr {
+                width: 5000,
+                height: 3000,
+                treat_as_char: true,
+                ..Default::default()
+            },
+            image_attr: ImageAttr { bin_data_id: 1, ..Default::default() },
+            ..Default::default()
+        })));
+        let header = Header {
+            paragraphs: vec![text_paragraph("머리말 본문"), pic_para],
+            ..Default::default()
+        };
+
+        let mut body = text_paragraph("body");
+        body.controls.push(Control::Header(Box::new(header)));
+        let mut section = Section::default();
+        section.paragraphs.push(body);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let hdr = parsed
+            .sections
+            .iter()
+            .flat_map(|s| s.paragraphs.iter())
+            .flat_map(|p| p.controls.iter())
+            .find_map(|c| match c {
+                Control::Header(h) => Some(h),
+                _ => None,
+            })
+            .expect("머리말이 라운드트립에서 살아남아야 한다");
+        assert_eq!(hdr.apply_to, HeaderFooterApply::Both, "applyPageType 보존");
+        assert!(
+            hdr.paragraphs.iter().any(|p| p.text.contains("머리말 본문")),
+            "머리말 텍스트 문단 보존: {:?}",
+            hdr.paragraphs.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
+        let pic = hdr
+            .paragraphs
+            .iter()
+            .flat_map(|p| p.controls.iter())
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("머리말 안 그림이 라운드트립에서 살아남아야 한다");
+        assert_eq!(pic.image_attr.bin_data_id, 1, "머리말 그림의 bin_data 참조 보존");
+        assert_eq!(parsed.bin_data_content[0].data, fake_png, "그림 바이너리 보존");
+    }
+
+    #[test]
+    fn footer_roundtrips_through_hwpx_with_apply_page_type() {
+        use crate::model::control::Control;
+        use crate::parser::hwpx::parse_hwpx;
+        use crate::serializer::hwpx::serialize_hwpx;
+
+        let mut doc = Document::default();
+        doc.doc_info.char_shapes.push(Default::default());
+        doc.doc_info.para_shapes.push(Default::default());
+        doc.doc_info.styles.push(Default::default());
+        doc.doc_info.border_fills.push(Default::default());
+
+        let footer = Footer {
+            apply_to: HeaderFooterApply::Even,
+            paragraphs: vec![text_paragraph("꼬리말 본문")],
+            ..Default::default()
+        };
+        let mut body = text_paragraph("body");
+        body.controls.push(Control::Footer(Box::new(footer)));
+        let mut section = Section::default();
+        section.paragraphs.push(body);
+        doc.sections.push(section);
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        let ftr = parsed
+            .sections
+            .iter()
+            .flat_map(|s| s.paragraphs.iter())
+            .flat_map(|p| p.controls.iter())
+            .find_map(|c| match c {
+                Control::Footer(f) => Some(f),
+                _ => None,
+            })
+            .expect("꼬리말이 라운드트립에서 살아남아야 한다");
+        assert_eq!(ftr.apply_to, HeaderFooterApply::Even, "applyPageType=EVEN 보존");
+        assert!(
+            ftr.paragraphs.iter().any(|p| p.text.contains("꼬리말 본문")),
+            "꼬리말 텍스트 문단 보존: {:?}",
+            ftr.paragraphs.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
     }
 }
