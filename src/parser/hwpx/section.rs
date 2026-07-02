@@ -23,7 +23,7 @@ use crate::model::shape::{
 };
 use crate::model::style::{Fill, ShapeBorderLine};
 use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
-use crate::model::HwpUnit16;
+use crate::model::{HwpUnit16, Point};
 
 use super::utils::{
     attr_str, local_name, parse_bool, parse_color, parse_hatch_style, parse_i16, parse_i32,
@@ -2158,7 +2158,45 @@ fn parse_shape_object(
     let mut x_coords = [0i32; 4];
     let mut y_coords = [0i32; 4];
 
+    // 도형별 geometry (ellipse/arc: 중심·축·시작끝점, polygon: hc:pt 목록, curve: hp:seg 목록)
+    let mut center = Point::default();
+    let mut ax1 = Point::default();
+    let mut ax2 = Point::default();
+    let mut start1 = Point::default();
+    let mut end1 = Point::default();
+    let mut start2 = Point::default();
+    let mut end2 = Point::default();
+    let mut poly_points: Vec<Point> = Vec::new();
+    let mut curve_points: Vec<Point> = Vec::new();
+    let mut curve_segment_types: Vec<u8> = Vec::new();
+
     parse_object_element_attrs(e, &mut common, &mut shape_attr);
+
+    // ellipse 전용 요소 속성 → HWP5 attr 비트 (표 88: bit0 intervalDirty,
+    // bit1 hasArcPr, bit2~ arcType) / arc 전용 type 속성 → arc_type
+    let mut ellipse_attr: u32 = 0;
+    let mut arc_type: u8 = 0;
+    for attr in e.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"intervalDirty" => {
+                if parse_bool(&attr) {
+                    ellipse_attr |= 0x01;
+                }
+            }
+            b"hasArcPr" => {
+                if parse_bool(&attr) {
+                    ellipse_attr |= 0x02;
+                }
+            }
+            b"arcType" => {
+                ellipse_attr |= (arc_kind_from_hwpx(&attr_str(&attr)) as u32) << 2;
+            }
+            b"type" if shape_type == b"arc" => {
+                arc_type = arc_kind_from_hwpx(&attr_str(&attr));
+            }
+            _ => {}
+        }
+    }
 
     let tag_name = String::from_utf8_lossy(shape_type).to_string();
     let mut buf = Vec::new();
@@ -2232,6 +2270,39 @@ fn parse_shape_object(
                     b"shadow" => {
                         // shadow는 무시 (Start 이벤트인 경우 내부 소비)
                     }
+                    // ellipse/arc geometry 자식 (hc:center, hc:ax1, hc:ax2, hc:start1~hc:end2)
+                    b"center" => center = parse_point_element(ce),
+                    b"ax1" => ax1 = parse_point_element(ce),
+                    b"ax2" => ax2 = parse_point_element(ce),
+                    b"start1" => start1 = parse_point_element(ce),
+                    b"end1" => end1 = parse_point_element(ce),
+                    b"start2" => start2 = parse_point_element(ce),
+                    b"end2" => end2 = parse_point_element(ce),
+                    // polygon 꼭짓점 (hc:pt)
+                    b"pt" => poly_points.push(parse_point_element(ce)),
+                    // curve 세그먼트 (hp:seg) — 인접 seg 는 점을 공유 (x1,y1 == 직전 x2,y2)
+                    b"seg" => {
+                        let mut seg_type = 0u8;
+                        let mut p1 = Point::default();
+                        let mut p2 = Point::default();
+                        for attr in ce.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"type" => {
+                                    seg_type = if attr_str(&attr) == "CURVE" { 1 } else { 0 }
+                                }
+                                b"x1" => p1.x = parse_i32(&attr),
+                                b"y1" => p1.y = parse_i32(&attr),
+                                b"x2" => p2.x = parse_i32(&attr),
+                                b"y2" => p2.y = parse_i32(&attr),
+                                _ => {}
+                            }
+                        }
+                        if curve_points.is_empty() {
+                            curve_points.push(p1);
+                        }
+                        curve_points.push(p2);
+                        curve_segment_types.push(seg_type);
+                    }
                     _ => {}
                 }
             }
@@ -2269,7 +2340,14 @@ fn parse_shape_object(
         b"ellipse" => ShapeObject::Ellipse(EllipseShape {
             common,
             drawing,
-            ..Default::default()
+            attr: ellipse_attr,
+            center,
+            axis1: ax1,
+            axis2: ax2,
+            start1,
+            end1,
+            start2,
+            end2,
         }),
         b"line" => ShapeObject::Line(LineShape {
             common,
@@ -2279,17 +2357,21 @@ fn parse_shape_object(
         b"arc" => ShapeObject::Arc(ArcShape {
             common,
             drawing,
-            ..Default::default()
+            arc_type,
+            center,
+            axis1: ax1,
+            axis2: ax2,
         }),
         b"polygon" => ShapeObject::Polygon(PolygonShape {
             common,
             drawing,
-            ..Default::default()
+            points: poly_points,
         }),
         b"curve" => ShapeObject::Curve(CurveShape {
             common,
             drawing,
-            ..Default::default()
+            points: curve_points,
+            segment_types: curve_segment_types,
         }),
         _ => ShapeObject::Rectangle(RectangleShape {
             common,
@@ -2301,6 +2383,28 @@ fn parse_shape_object(
     };
 
     Ok(Control::Shape(Box::new(shape)))
+}
+
+/// OWPML 호 종류 문자열 → HWP5 호 타입 값 (0: NORMAL/Arc, 1: PIE/부채꼴, 2: CHORD/활)
+fn arc_kind_from_hwpx(s: &str) -> u8 {
+    match s {
+        "PIE" => 1,
+        "CHORD" => 2,
+        _ => 0, // NORMAL
+    }
+}
+
+/// `<hc:center x=".." y=".."/>` 류 좌표 요소 → Point
+fn parse_point_element(ce: &quick_xml::events::BytesStart) -> Point {
+    let mut p = Point::default();
+    for attr in ce.attributes().flatten() {
+        match attr.key.as_ref() {
+            b"x" => p.x = parse_i32(&attr),
+            b"y" => p.y = parse_i32(&attr),
+            _ => {}
+        }
+    }
+    p
 }
 
 // ─── 묶음(그룹) 객체 파싱 ───

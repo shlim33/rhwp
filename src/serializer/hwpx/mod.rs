@@ -949,6 +949,436 @@ mod tests {
         );
     }
 
+    // =================================================================
+    // 도형 GEOMETRY 라운드트립 (ellipse / arc / polygon / curve)
+    // =================================================================
+
+    /// 도형 1개를 담은 라운드트립용 Document 뼈대 생성.
+    fn doc_with_shape(shape: crate::model::shape::ShapeObject) -> Document {
+        use crate::model::control::Control;
+
+        let mut doc = Document::default();
+        let mut section = crate::model::document::Section::default();
+        let mut para = crate::model::paragraph::Paragraph::default();
+        para.text = "A".to_string();
+        para.char_offsets = vec![8];
+        para.char_count = 10;
+        para.controls.push(Control::Shape(Box::new(shape)));
+        section.paragraphs.push(para);
+        doc.sections.push(section);
+        doc
+    }
+
+    /// IR → serialize_hwpx → parse_hwpx 라운드트립 후 첫 Shape 컨트롤을 반환.
+    fn roundtrip_shape(shape: crate::model::shape::ShapeObject) -> crate::model::shape::ShapeObject {
+        use crate::model::control::Control;
+
+        let doc = doc_with_shape(shape);
+        let bytes = serialize_hwpx(&doc).expect("serialize shape");
+        let parsed = parse_hwpx(&bytes).expect("parse back");
+        parsed.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .find_map(|c| match c {
+                Control::Shape(s) => Some((**s).clone()),
+                _ => None,
+            })
+            .expect("shape control must survive roundtrip")
+    }
+
+    /// 문서 전체(본문 + 표 셀 + 묶음 개체 재귀)에서 ShapeObject 를 수집.
+    fn collect_shape_objects(doc: &Document) -> Vec<&crate::model::shape::ShapeObject> {
+        use crate::model::control::Control;
+        use crate::model::shape::ShapeObject;
+
+        fn walk_shape<'a>(s: &'a ShapeObject, out: &mut Vec<&'a ShapeObject>) {
+            out.push(s);
+            let text_box = match s {
+                ShapeObject::Group(g) => {
+                    for ch in &g.children {
+                        walk_shape(ch, out);
+                    }
+                    None
+                }
+                ShapeObject::Rectangle(r) => r.drawing.text_box.as_ref(),
+                ShapeObject::Ellipse(e) => e.drawing.text_box.as_ref(),
+                ShapeObject::Line(l) => l.drawing.text_box.as_ref(),
+                ShapeObject::Arc(a) => a.drawing.text_box.as_ref(),
+                ShapeObject::Polygon(p) => p.drawing.text_box.as_ref(),
+                ShapeObject::Curve(cv) => cv.drawing.text_box.as_ref(),
+                _ => None,
+            };
+            if let Some(tb) = text_box {
+                for p in &tb.paragraphs {
+                    for c in &p.controls {
+                        walk_ctrl(c, out);
+                    }
+                }
+            }
+        }
+        fn walk_ctrl<'a>(c: &'a Control, out: &mut Vec<&'a ShapeObject>) {
+            match c {
+                Control::Shape(s) => walk_shape(s, out),
+                Control::Table(t) => {
+                    for cell in &t.cells {
+                        for p in &cell.paragraphs {
+                            for c in &p.controls {
+                                walk_ctrl(c, out);
+                            }
+                        }
+                    }
+                }
+                Control::Footnote(n) => {
+                    for p in &n.paragraphs {
+                        for c in &p.controls {
+                            walk_ctrl(c, out);
+                        }
+                    }
+                }
+                Control::Endnote(n) => {
+                    for p in &n.paragraphs {
+                        for c in &p.controls {
+                            walk_ctrl(c, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for sec in &doc.sections {
+            for para in &sec.paragraphs {
+                for ctrl in &para.controls {
+                    walk_ctrl(ctrl, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// Point 목록 → (x, y) 튜플 목록 (Point 가 PartialEq 미구현이라 비교용).
+    fn pts(v: &[crate::model::Point]) -> Vec<(i32, i32)> {
+        v.iter().map(|p| (p.x, p.y)).collect()
+    }
+
+    #[test]
+    fn ellipse_geometry_roundtrips_through_hwpx() {
+        use crate::model::shape::{CommonObjAttr, EllipseShape, ShapeObject};
+        use crate::model::Point;
+
+        let ell = EllipseShape {
+            common: CommonObjAttr {
+                width: 4000,
+                height: 3000,
+                ..Default::default()
+            },
+            // intervalDirty=1(bit0), hasArcPr=1(bit1), arcType=PIE(1, bit2~)
+            attr: 0b111,
+            center: Point { x: 2000, y: 1500 },
+            axis1: Point { x: 4000, y: 1500 },
+            axis2: Point { x: 2000, y: 3000 },
+            start1: Point { x: 11, y: 22 },
+            end1: Point { x: 33, y: 44 },
+            start2: Point { x: 55, y: 66 },
+            end2: Point { x: 77, y: 88 },
+            ..Default::default()
+        };
+
+        let rt = roundtrip_shape(ShapeObject::Ellipse(ell));
+        let e = match rt {
+            ShapeObject::Ellipse(e) => e,
+            other => panic!("expected Ellipse after roundtrip, got {:?}", other),
+        };
+        assert_eq!(e.attr, 0b111, "ellipse attr(intervalDirty/hasArcPr/arcType) must roundtrip");
+        assert_eq!((e.center.x, e.center.y), (2000, 1500), "center must roundtrip");
+        assert_eq!((e.axis1.x, e.axis1.y), (4000, 1500), "axis1 must roundtrip");
+        assert_eq!((e.axis2.x, e.axis2.y), (2000, 3000), "axis2 must roundtrip");
+        assert_eq!((e.start1.x, e.start1.y), (11, 22), "start1 must roundtrip");
+        assert_eq!((e.end1.x, e.end1.y), (33, 44), "end1 must roundtrip");
+        assert_eq!((e.start2.x, e.start2.y), (55, 66), "start2 must roundtrip");
+        assert_eq!((e.end2.x, e.end2.y), (77, 88), "end2 must roundtrip");
+    }
+
+    #[test]
+    fn arc_geometry_roundtrips_through_hwpx() {
+        use crate::model::shape::{ArcShape, CommonObjAttr, ShapeObject};
+        use crate::model::Point;
+
+        let arc = ArcShape {
+            common: CommonObjAttr {
+                width: 5000,
+                height: 2500,
+                ..Default::default()
+            },
+            arc_type: 2, // CHORD(활)
+            center: Point { x: 2500, y: 2500 },
+            axis1: Point { x: 0, y: 2500 },
+            axis2: Point { x: 2500, y: 0 },
+            ..Default::default()
+        };
+
+        let rt = roundtrip_shape(ShapeObject::Arc(arc));
+        let a = match rt {
+            ShapeObject::Arc(a) => a,
+            other => panic!("expected Arc after roundtrip, got {:?}", other),
+        };
+        assert_eq!(a.arc_type, 2, "arc_type must roundtrip");
+        assert_eq!((a.center.x, a.center.y), (2500, 2500), "center must roundtrip");
+        assert_eq!((a.axis1.x, a.axis1.y), (0, 2500), "axis1 must roundtrip");
+        assert_eq!((a.axis2.x, a.axis2.y), (2500, 0), "axis2 must roundtrip");
+    }
+
+    #[test]
+    fn polygon_geometry_roundtrips_through_hwpx() {
+        use crate::model::shape::{CommonObjAttr, PolygonShape, ShapeObject};
+        use crate::model::Point;
+
+        let points = vec![
+            Point { x: 1360, y: 8 },
+            Point { x: 0, y: 612 },
+            Point { x: 2736, y: 624 },
+            Point { x: -40, y: -80 },
+            Point { x: 1360, y: 0 },
+        ];
+        let poly = PolygonShape {
+            common: CommonObjAttr {
+                width: 2740,
+                height: 628,
+                ..Default::default()
+            },
+            points: points.clone(),
+            ..Default::default()
+        };
+
+        let rt = roundtrip_shape(ShapeObject::Polygon(poly));
+        let p = match rt {
+            ShapeObject::Polygon(p) => p,
+            other => panic!("expected Polygon after roundtrip, got {:?}", other),
+        };
+        assert_eq!(
+            pts(&p.points),
+            pts(&points),
+            "polygon points must roundtrip verbatim"
+        );
+    }
+
+    #[test]
+    fn curve_geometry_roundtrips_through_hwpx() {
+        use crate::model::shape::{CommonObjAttr, CurveShape, ShapeObject};
+        use crate::model::Point;
+
+        let points = vec![
+            Point { x: 190, y: 50 },
+            Point { x: 500, y: 120 },
+            Point { x: 900, y: -30 },
+            Point { x: 190, y: 50 },
+        ];
+        let segment_types = vec![1u8, 0, 1]; // CURVE / LINE / CURVE
+        let curve = CurveShape {
+            common: CommonObjAttr {
+                width: 3175,
+                height: 1090,
+                ..Default::default()
+            },
+            points: points.clone(),
+            segment_types: segment_types.clone(),
+            ..Default::default()
+        };
+
+        let rt = roundtrip_shape(ShapeObject::Curve(curve));
+        let cv = match rt {
+            ShapeObject::Curve(cv) => cv,
+            other => panic!("expected Curve after roundtrip, got {:?}", other),
+        };
+        assert_eq!(
+            pts(&cv.points),
+            pts(&points),
+            "curve points must roundtrip verbatim"
+        );
+        assert_eq!(
+            cv.segment_types, segment_types,
+            "curve segment types must roundtrip verbatim"
+        );
+    }
+
+    /// 골든: 한컴 변환본 hwp3-sample11-hwpx.hwpx 의 hp:ellipse / hp:polygon
+    /// geometry 가 원본 XML 값 그대로 IR 에 실리는지 검증 (파서를 한컴 포맷에 고정).
+    ///
+    /// 원본 XML 관측값 (Contents/section0.xml):
+    /// - hp:ellipse 59개 / hp:polygon 21개
+    /// - instid=11823569 ellipse: <hc:center x="48" y="68"/><hc:ax1 x="42" y="4"/>
+    ///   <hc:ax2 x="90" y="64"/>, start1~end2 모두 (0,0), hasArcPr=0 arcType=NORMAL
+    /// - instid=11824244 polygon: <hc:pt> 4개 — (1360,8) (0,612) (2736,624) (1360,0)
+    #[test]
+    fn hwp3_sample11_ellipse_polygon_geometry_matches_hancom_xml() {
+        use crate::model::shape::ShapeObject;
+        use crate::model::Point;
+
+        let bytes = std::fs::read("samples/hwp3-sample11-hwpx.hwpx")
+            .expect("samples/hwp3-sample11-hwpx.hwpx must be readable");
+        let doc = parse_hwpx(&bytes).expect("parse sample");
+        let shapes = collect_shape_objects(&doc);
+
+        let ellipses: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                ShapeObject::Ellipse(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ellipses.len(), 59, "sample must contain 59 hp:ellipse");
+
+        let pinned = ellipses
+            .iter()
+            .find(|e| e.common.instance_id == 11823569)
+            .expect("ellipse instid=11823569 must exist");
+        assert_eq!((pinned.center.x, pinned.center.y), (48, 68), "golden hc:center");
+        assert_eq!((pinned.axis1.x, pinned.axis1.y), (42, 4), "golden hc:ax1");
+        assert_eq!((pinned.axis2.x, pinned.axis2.y), (90, 64), "golden hc:ax2");
+        assert_eq!((pinned.start1.x, pinned.start1.y), (0, 0), "golden hc:start1");
+        assert_eq!((pinned.end2.x, pinned.end2.y), (0, 0), "golden hc:end2");
+        assert_eq!(
+            pinned.attr, 0,
+            "intervalDirty=0 hasArcPr=0 arcType=NORMAL → attr bits 0"
+        );
+
+        let polygons: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                ShapeObject::Polygon(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polygons.len(), 21, "sample must contain 21 hp:polygon");
+
+        let pinned_poly = polygons
+            .iter()
+            .find(|p| p.common.instance_id == 11824244)
+            .expect("polygon instid=11824244 must exist");
+        assert_eq!(
+            pts(&pinned_poly.points),
+            vec![(1360, 8), (0, 612), (2736, 624), (1360, 0)],
+            "golden hc:pt list"
+        );
+    }
+
+    /// 골든: 3-09월_교육_통합_2022.hwpx 의 hp:curve (유일 1개) geometry.
+    ///
+    /// 원본 XML 관측값: hp:seg 417개 (type=CURVE/LINE 혼재),
+    /// 첫 seg = CURVE (190,50)→(190,50), 마지막 seg = LINE (2775,50)→(190,50).
+    /// → 점 418개, 첫 점 (190,50), 마지막 점 (190,50), 마지막 seg type=LINE(0).
+    #[test]
+    fn curve_sample_geometry_matches_hancom_xml() {
+        use crate::model::shape::ShapeObject;
+        use crate::model::Point;
+
+        let bytes = std::fs::read("samples/3-09월_교육_통합_2022.hwpx")
+            .expect("samples/3-09월_교육_통합_2022.hwpx must be readable");
+        let doc = parse_hwpx(&bytes).expect("parse sample");
+        let shapes = collect_shape_objects(&doc);
+
+        let curve = shapes
+            .iter()
+            .find_map(|s| match s {
+                ShapeObject::Curve(cv) => Some(cv),
+                _ => None,
+            })
+            .expect("sample must contain the hp:curve");
+        assert_eq!(curve.points.len(), 418, "417 seg → 418 points");
+        assert_eq!(
+            curve.segment_types.len(),
+            417,
+            "one segment type per hp:seg"
+        );
+        assert_eq!((curve.points[0].x, curve.points[0].y), (190, 50), "first point");
+        assert_eq!((curve.points[417].x, curve.points[417].y), (190, 50), "last point");
+        assert_eq!(curve.segment_types[0], 1, "first seg type=CURVE → 1");
+        assert_eq!(curve.segment_types[416], 0, "last seg type=LINE → 0");
+        assert!(
+            curve.segment_types.contains(&0) && curve.segment_types.contains(&1),
+            "sample curve mixes CURVE and LINE segments"
+        );
+    }
+
+    /// E2E: hwp3-sample11-hwpx.hwpx 파싱 → 직렬화 → 재파싱 시
+    /// ellipse/polygon 총 개수와 핀 고정 geometry 가 보존되고,
+    /// 내보낸 section XML 에 geometry 자식 요소가 실제로 존재해야 한다.
+    #[test]
+    fn hwp3_sample11_shape_geometry_survives_export() {
+        use crate::model::shape::ShapeObject;
+
+        let bytes = std::fs::read("samples/hwp3-sample11-hwpx.hwpx")
+            .expect("samples/hwp3-sample11-hwpx.hwpx must be readable");
+        let original = parse_hwpx(&bytes).expect("parse original");
+
+        let out = serialize_hwpx(&original).expect("re-serialize");
+        let cursor = std::io::Cursor::new(&out);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        drop(sec0);
+
+        // 내보낸 XML 이 껍데기가 아니라 geometry 자식을 담아야 한다.
+        assert_eq!(
+            xml.matches("<hp:ellipse ").count(),
+            59,
+            "exported section0 must keep all 59 <hp:ellipse>"
+        );
+        assert_eq!(
+            xml.matches("<hp:polygon ").count(),
+            21,
+            "exported section0 must keep all 21 <hp:polygon>"
+        );
+        assert!(
+            xml.contains("<hc:center "),
+            "exported ellipse must contain <hc:center> geometry child"
+        );
+        assert!(
+            xml.contains(r#"<hc:ax1 x="42" y="4"/>"#),
+            "exported ellipse must contain pinned <hc:ax1> values"
+        );
+        assert!(
+            xml.contains(r#"<hc:pt x="1360" y="8"/>"#),
+            "exported polygon must contain pinned <hc:pt> values"
+        );
+
+        // 재파싱 후 개수 + 핀 고정 geometry 보존
+        let reparsed = parse_hwpx(&out).expect("parse back");
+        let shapes = collect_shape_objects(&reparsed);
+        let ellipses: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                ShapeObject::Ellipse(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ellipses.len(), 59, "ellipse count must survive export+reparse");
+
+        // 핀 고정 ellipse: 재직렬화가 instid 를 보존하지 않으므로 geometry 값으로 탐색
+        assert!(
+            ellipses.iter().any(|e| (e.center.x, e.center.y) == (48, 68)
+                && (e.axis1.x, e.axis1.y) == (42, 4)
+                && (e.axis2.x, e.axis2.y) == (90, 64)),
+            "pinned ellipse geometry must survive export+reparse"
+        );
+
+        let polygons: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                ShapeObject::Polygon(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polygons.len(), 21, "polygon count must survive export+reparse");
+        assert!(
+            polygons
+                .iter()
+                .any(|p| pts(&p.points) == vec![(1360, 8), (0, 612), (2736, 624), (1360, 0)]),
+            "pinned polygon geometry must survive export+reparse"
+        );
+    }
+
     /// tac-img-02.hwpx 파싱 후 BinData 가 존재하는지, Picture 컨트롤이
     /// section XML 에 반영되는지 확인하는 스모크 테스트.
     /// 실문서는 borderFillIDRef 가 복잡하여 full roundtrip 대신 직렬화 단계만 검증.

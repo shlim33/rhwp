@@ -26,7 +26,11 @@ use crate::model::footnote::{Footnote, Endnote};
 use crate::model::document::{Document, Section};
 use crate::model::page::PageDef;
 use crate::model::paragraph::{ColumnBreakType, LineSeg, Paragraph};
-use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertAlign, VertRelTo};
+use crate::model::shape::{
+    ArcShape, CommonObjAttr, CurveShape, EllipseShape, HorzAlign, HorzRelTo, ShapeObject,
+    TextWrap, VertAlign, VertRelTo,
+};
+use crate::model::Point;
 
 use super::context::SerializeContext;
 use super::{picture, table};
@@ -446,33 +450,49 @@ fn render_shape(shape: &ShapeObject, ctx: &mut SerializeContext) -> String {
             Err(e) => { eprintln!("[hwpx] Shape::Group 직렬화 실패: {e}"); String::new() }
         };
     }
-    let (tag, c) = match shape {
+    let (tag, c, extra_attrs, geometry) = match shape {
         ShapeObject::Rectangle(_) | ShapeObject::Line(_) | ShapeObject::Group(_) => {
             unreachable!()
         }
-        ShapeObject::Ellipse(e) => ("ellipse", &e.common),
-        ShapeObject::Arc(a) => ("arc", &a.common),
-        ShapeObject::Polygon(p) => ("polygon", &p.common),
-        ShapeObject::Curve(cv) => ("curve", &cv.common),
+        ShapeObject::Ellipse(e) => (
+            "ellipse",
+            &e.common,
+            ellipse_extra_attrs(e),
+            ellipse_geometry_xml(e),
+        ),
+        ShapeObject::Arc(a) => (
+            "arc",
+            &a.common,
+            format!(r#" type="{}""#, arc_kind_to_hwpx(a.arc_type)),
+            arc_geometry_xml(a),
+        ),
+        ShapeObject::Polygon(p) => (
+            "polygon",
+            &p.common,
+            String::new(),
+            polygon_geometry_xml(&p.points),
+        ),
+        ShapeObject::Curve(cv) => ("curve", &cv.common, String::new(), curve_geometry_xml(cv)),
         ShapeObject::Picture(pic) => {
             return match writer_to_string(|w| picture::write_picture(w, pic, ctx)) {
                 Ok(xml) => xml,
                 Err(e) => { eprintln!("[hwpx] Shape::Picture 직렬화 실패: {e}"); String::new() }
             };
         }
-        ShapeObject::Chart(ch) => ("chart", &ch.common),
-        ShapeObject::Ole(o) => ("ole", &o.common),
+        ShapeObject::Chart(ch) => ("chart", &ch.common, String::new(), String::new()),
+        ShapeObject::Ole(o) => ("ole", &o.common, String::new(), String::new()),
     };
-    render_common_shape_xml(tag, c)
+    render_common_shape_xml(tag, c, &extra_attrs, &geometry)
 }
 
-fn render_common_shape_xml(tag: &str, c: &CommonObjAttr) -> String {
+fn render_common_shape_xml(tag: &str, c: &CommonObjAttr, extra_attrs: &str, geometry: &str) -> String {
     format!(
         concat!(
-            r#"<hp:{tag} id="{id}" zOrder="{zo}" textWrap="{tw}" textFlow="BOTH_SIDES" lock="0">"#,
+            r#"<hp:{tag} id="{id}" zOrder="{zo}" textWrap="{tw}" textFlow="BOTH_SIDES" lock="0"{extra}>"#,
             r#"<hp:sz width="{w}" height="{h}" widthRelTo="ABSOLUTE" heightRelTo="ABSOLUTE"/>"#,
             r#"<hp:pos treatAsChar="{tac}" vertRelTo="{vr}" vertAlign="{va}" horzRelTo="{hr}" horzAlign="{ha}" vertOffset="{vo}" horzOffset="{ho}"/>"#,
             r#"<hp:outMargin left="{ml}" right="{mr}" top="{mt}" bottom="{mb}"/>"#,
+            "{geometry}",
             r#"</hp:{tag}>"#,
         ),
         tag = tag,
@@ -485,7 +505,85 @@ fn render_common_shape_xml(tag: &str, c: &CommonObjAttr) -> String {
         vo = c.vertical_offset, ho = c.horizontal_offset,
         ml = c.margin.left, mr = c.margin.right,
         mt = c.margin.top, mb = c.margin.bottom,
+        extra = extra_attrs,
+        geometry = geometry,
     )
+}
+
+// ─── 도형 geometry 직렬화 (ellipse / arc / polygon / curve) ───
+//
+// 한컴 OWPML 관측 포맷 (samples/hwp3-sample11-hwpx.hwpx, 3-09월_교육_통합_2022.hwpx):
+//   ellipse: intervalDirty/hasArcPr/arcType 요소 속성 +
+//            <hc:center/><hc:ax1/><hc:ax2/><hc:start1/><hc:end1/><hc:start2/><hc:end2/>
+//   arc:     type 요소 속성 + <hc:center/><hc:ax1/><hc:ax2/>
+//   polygon: <hc:pt x y/> 목록
+//   curve:   <hp:seg type="CURVE|LINE" x1 y1 x2 y2/> 목록 (점 N개 → seg N-1개, 점 공유)
+
+/// `<hc:center x=".." y=".."/>` 류 좌표 요소 생성.
+fn point_xml(tag: &str, p: &Point) -> String {
+    format!(r#"<{} x="{}" y="{}"/>"#, tag, p.x, p.y)
+}
+
+/// HWP5 호 타입 값 → OWPML 호 종류 문자열 (parser::hwpx `arc_kind_from_hwpx` 의 역).
+fn arc_kind_to_hwpx(v: u8) -> &'static str {
+    match v {
+        1 => "PIE",
+        2 => "CHORD",
+        _ => "NORMAL",
+    }
+}
+
+/// ellipse 요소 속성 — HWP5 attr 비트(표 88) → intervalDirty/hasArcPr/arcType.
+fn ellipse_extra_attrs(e: &EllipseShape) -> String {
+    format!(
+        r#" intervalDirty="{}" hasArcPr="{}" arcType="{}""#,
+        e.attr & 0x01,
+        (e.attr >> 1) & 0x01,
+        arc_kind_to_hwpx(((e.attr >> 2) & 0xFF) as u8),
+    )
+}
+
+fn ellipse_geometry_xml(e: &EllipseShape) -> String {
+    [
+        point_xml("hc:center", &e.center),
+        point_xml("hc:ax1", &e.axis1),
+        point_xml("hc:ax2", &e.axis2),
+        point_xml("hc:start1", &e.start1),
+        point_xml("hc:end1", &e.end1),
+        point_xml("hc:start2", &e.start2),
+        point_xml("hc:end2", &e.end2),
+    ]
+    .concat()
+}
+
+fn arc_geometry_xml(a: &ArcShape) -> String {
+    [
+        point_xml("hc:center", &a.center),
+        point_xml("hc:ax1", &a.axis1),
+        point_xml("hc:ax2", &a.axis2),
+    ]
+    .concat()
+}
+
+fn polygon_geometry_xml(points: &[Point]) -> String {
+    points.iter().map(|p| point_xml("hc:pt", p)).collect()
+}
+
+/// 점 N개 + 세그먼트 타입 N-1개 → `<hp:seg/>` N-1개 (0: LINE, 1: CURVE).
+fn curve_geometry_xml(cv: &CurveShape) -> String {
+    let mut out = String::new();
+    for i in 0..cv.points.len().saturating_sub(1) {
+        let t = if cv.segment_types.get(i) == Some(&1) { "CURVE" } else { "LINE" };
+        out.push_str(&format!(
+            r#"<hp:seg type="{}" x1="{}" y1="{}" x2="{}" y2="{}"/>"#,
+            t,
+            cv.points[i].x,
+            cv.points[i].y,
+            cv.points[i + 1].x,
+            cv.points[i + 1].y,
+        ));
+    }
+    out
 }
 
 fn render_note_sublist(tag: &str, number: u16, paragraphs: &[Paragraph], ctx: &mut SerializeContext) -> String {
