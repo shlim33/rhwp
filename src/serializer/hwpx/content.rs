@@ -103,6 +103,9 @@ pub fn write_content_hpf(
         ],
     )?;
 
+    // ZIP 패키지에 직렬화된 BinData 는 정의상 전부 임베드. 한컴 편집기는
+    // isEmbeded 부재를 외부 파일 참조로 해석해 이미지를 표시하지 않으므로
+    // (정본 샘플 전수가 isEmbeded="1" 표기) 항상 명시한다.
     for entry in bin_data {
         empty_tag(
             &mut w,
@@ -111,6 +114,7 @@ pub fn write_content_hpf(
                 ("id", entry.id.as_str()),
                 ("href", entry.href.as_str()),
                 ("media-type", entry.media_type.as_str()),
+                ("isEmbeded", "1"),
             ],
         )?;
     }

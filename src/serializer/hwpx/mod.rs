@@ -166,6 +166,37 @@ mod tests {
         assert_eq!(parsed.sections.len(), 1);
     }
 
+    /// content.hpf manifest 의 BinData 항목은 `isEmbeded="1"` 을 반드시 가져야 한다.
+    /// ZIP 패키지 안에 직렬화되는 BinData 는 정의상 전부 임베드이며, 한컴 편집기는
+    /// 속성 부재를 외부 파일 참조로 해석해 이미지를 표시하지 않는다
+    /// (한컴 정본 샘플 전수가 isEmbeded="1" 표기 — samples/pic2.hwpx 등).
+    #[test]
+    fn content_hpf_marks_bin_data_items_embedded() {
+        use crate::model::bin_data::BinDataContent;
+
+        let mut doc = Document::default();
+        doc.sections.push(crate::model::document::Section::default());
+        doc.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            extension: "jpg".to_string(),
+        });
+
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("valid zip");
+        let mut hpf = archive.by_name("Contents/content.hpf").expect("content.hpf");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut hpf, &mut xml).expect("read");
+
+        assert!(
+            xml.contains(
+                r#"<opf:item id="image1" href="BinData/image1.jpg" media-type="image/jpeg" isEmbeded="1"/>"#
+            ),
+            "manifest bin item must carry isEmbeded=\"1\": {xml}"
+        );
+    }
+
     /// E2E — 사용자 시나리오 재현: 편집기에서 그린 사각형(테두리+채우기, 페이지 오프셋)을
     /// export 하면 section XML 에 hp:lineShape / hc:fillBrush / hc:pt0..3 이 있어야 한다.
     /// (user2-152976e6.hwpx 는 sz/pos/outMargin 만 있어 재열기 시 도형이 투명해졌다.)
