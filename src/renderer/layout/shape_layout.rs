@@ -164,6 +164,7 @@ impl LayoutEngine {
             let eq_node = RenderNode::new(
                 tree.next_id(),
                 RenderNodeType::Equation(EquationNode {
+                    script: eq.script.clone(),
                     svg_content,
                     layout_box,
                     color_str,
@@ -1654,6 +1655,7 @@ impl LayoutEngine {
                             let eq_node = RenderNode::new(
                                 tree.next_id(),
                                 RenderNodeType::Equation(EquationNode {
+                                    script: eq.script.clone(),
                                     svg_content,
                                     layout_box,
                                     color_str,

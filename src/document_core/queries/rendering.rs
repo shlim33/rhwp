@@ -2266,6 +2266,21 @@ impl DocumentCore {
                         *has_token = true;
                     }
                 }
+                // 수식: 모델이 이미 파싱해 둔 스크립트("1 over 2" 등)를 원위치
+                // 인라인으로 방출한다. 이전에는 팔이 없어 무음 탈락했고,
+                // 시험지류 문서에서 본문 수식이 전량 유실됐다(2026-08-06
+                // xyren-parse 품질 실사 실측: 모의고사 hwpx 수식 2,207개 소실).
+                RenderNodeType::Equation(eq) => {
+                    let script = eq.script.trim();
+                    if !script.is_empty() {
+                        if !out.is_empty() && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(script);
+                        out.push(' ');
+                        *has_token = true;
+                    }
+                }
                 _ => {}
             }
 
@@ -2288,6 +2303,16 @@ impl DocumentCore {
                 let txt = para.text.trim();
                 if !txt.is_empty() {
                     parts.push(markdown_escape_cell(txt));
+                }
+                // 셀 안 수식도 본문 라인과 같은 이유로 스크립트를 방출한다 —
+                // 문단 .text 에는 컨트롤 내용이 없어 이전에는 무음 유실됐다.
+                for ctrl in &para.controls {
+                    if let crate::model::control::Control::Equation(eq) = ctrl {
+                        let script = eq.script.trim();
+                        if !script.is_empty() {
+                            parts.push(markdown_escape_cell(script));
+                        }
+                    }
                 }
             }
             parts.join(" <br> ")
