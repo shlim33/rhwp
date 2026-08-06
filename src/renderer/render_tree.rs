@@ -720,6 +720,10 @@ pub struct GroupNode {
 /// 수식 노드 (SVG 인라인 렌더링)
 #[derive(Debug, Clone, Serialize)]
 pub struct EquationNode {
+    /// 수식 스크립트 원문("1 over 2" 류) — 마크다운/텍스트 추출이 내용을
+    /// 방출할 수 있게 빌드 시점에 싣는다(좌표 역참조는 미주·각주 수식에서
+    /// 본문 문단 좌표계와 어긋나 실패한다 — 2026-08-06 실측).
+    pub script: String,
     /// 수식 SVG 조각 (viewBox 기준 상대 좌표)
     pub svg_content: String,
     /// 수식 레이아웃 트리 (Canvas 렌더링용)
