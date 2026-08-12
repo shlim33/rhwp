@@ -2422,6 +2422,7 @@ mod tests {
                     PaintOp::Equation {
                         bbox: BoundingBox::new(5.0, 6.0, 30.0, 20.0),
                         equation: EquationNode {
+                            script: "x".to_string(),
                             svg_content: "<text>x</text>".to_string(),
                             layout_box: LayoutBox {
                                 x: 0.0,

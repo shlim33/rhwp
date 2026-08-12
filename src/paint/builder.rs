@@ -858,6 +858,7 @@ mod tests {
 
     fn equation_node() -> EquationNode {
         EquationNode {
+            script: "x".to_string(),
             svg_content: "<text>x</text>".to_string(),
             layout_box: LayoutBox {
                 x: 0.0,
