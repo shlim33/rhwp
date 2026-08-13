@@ -237,6 +237,148 @@ export class RhwpEditor {
   }
 
   /**
+   * xyren-edit-v1 capability 확인 — 미지원 스튜디오에는 요청을 보내지 않는다.
+   * @internal
+   */
+  _requireEdit(method) {
+    if (!this._transport.supports('xyren-edit-v1')) {
+      throw new Error(`${method} is not supported by this Studio (xyren-edit-v1)`);
+    }
+  }
+
+  /**
+   * 새 빈 문서를 생성합니다.
+   * @param options.skipUnsavedGuard - 편집 중 문서 교체 확인창을 건너뜁니다. 기본 true
+   * @returns {Promise<{pageCount: number}>}
+   */
+  async createNewDocument(options = {}) {
+    this._requireEdit('createNewDocument');
+    return this._request('createNewDocument', {
+      skipUnsavedGuard: options.skipUnsavedGuard ?? true,
+    });
+  }
+
+  /**
+   * 현재 커서 위치에 일반 텍스트를 삽입합니다 (줄바꿈은 문단 분리).
+   * @param {string} text
+   * @returns {Promise<{insertedChars: number, pageCount: number}>}
+   */
+  async insertText(text) {
+    this._requireEdit('insertText');
+    return this._request('insertText', { text });
+  }
+
+  /**
+   * 선택 영역 존재 여부를 반환합니다.
+   * @returns {Promise<boolean>}
+   */
+  async hasSelection() {
+    this._requireEdit('hasSelection');
+    return this._request('hasSelection');
+  }
+
+  /**
+   * 현재 선택 범위(start/end DocumentPosition)를 반환합니다. 없으면 null.
+   * @returns {Promise<object|null>}
+   */
+  async getSelection() {
+    this._requireEdit('getSelection');
+    return this._request('getSelection');
+  }
+
+  /**
+   * 현재 선택 영역의 plain text를 반환합니다.
+   * @returns {Promise<string>}
+   */
+  async getSelectedText() {
+    this._requireEdit('getSelectedText');
+    return this._request('getSelectedText');
+  }
+
+  /**
+   * 현재 선택 영역을 plain text로 대체합니다.
+   * @param {string} text
+   * @returns {Promise<{replacedChars: number, pageCount: number}>}
+   */
+  async replaceSelection(text) {
+    this._requireEdit('replaceSelection');
+    return this._request('replaceSelection', { text });
+  }
+
+  /**
+   * 현재 본문 선택 영역을 이미지로 대체합니다.
+   * @param {Uint8Array|ArrayBuffer} data - 이미지 바이트
+   * @param options.extension - 확장자 (기본 png)
+   * @param options.naturalWidth / options.naturalHeight - 원본 픽셀 크기
+   * @param options.fileName - 설명에 쓸 파일 이름
+   * @returns {Promise<{inserted: boolean, pageCount: number, controlIndex?: number}>}
+   */
+  async replaceSelectionWithImage(data, options = {}) {
+    this._requireEdit('replaceSelectionWithImage');
+    return this._request('replaceSelectionWithImage', {
+      data: data instanceof Uint8Array ? data : new Uint8Array(data),
+      extension: options.extension ?? 'png',
+      naturalWidth: options.naturalWidth ?? 1,
+      naturalHeight: options.naturalHeight ?? 1,
+      fileName: options.fileName ?? 'worksheet-ai-image.png',
+    });
+  }
+
+  /**
+   * linesegs를 전체 재계산(reflow)합니다.
+   * @returns {Promise<{reflowed: number, pageCount: number}>}
+   */
+  async reflowLinesegs() {
+    this._requireEdit('reflowLinesegs');
+    return this._request('reflowLinesegs');
+  }
+
+  /**
+   * 미저장 변경 여부를 반환합니다 (저장 완료 통지는 notifySaved 사용).
+   * @returns {Promise<boolean>}
+   */
+  async isDirty() {
+    this._requireEdit('isDirty');
+    return this._request('isDirty');
+  }
+
+  /**
+   * 구역의 문단 수를 반환합니다.
+   * @returns {Promise<number>}
+   */
+  async getParagraphCount(section = 0) {
+    this._requireEdit('getParagraphCount');
+    return this._request('getParagraphCount', { section });
+  }
+
+  /**
+   * 문단의 글자 수를 반환합니다.
+   * @returns {Promise<number>}
+   */
+  async getParagraphLength(section, para) {
+    this._requireEdit('getParagraphLength');
+    return this._request('getParagraphLength', { section, para });
+  }
+
+  /**
+   * 문단 텍스트 일부를 반환합니다.
+   * @returns {Promise<string>}
+   */
+  async getTextRange(section, para, charOffset, count) {
+    this._requireEdit('getTextRange');
+    return this._request('getTextRange', { section, para, charOffset, count });
+  }
+
+  /**
+   * 지정 위치의 글자 서식을 반환합니다.
+   * @returns {Promise<object>}
+   */
+  async getCharPropertiesAt(section, para, charOffset) {
+    this._requireEdit('getCharPropertiesAt');
+    return this._request('getCharPropertiesAt', { section, para, charOffset });
+  }
+
+  /**
    * iframe 엘리먼트를 반환합니다.
    */
   get element() {

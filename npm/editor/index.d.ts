@@ -151,6 +151,40 @@ export interface LoadFileOptions {
   suppressDialogs?: boolean;
 }
 
+export interface CreateDocumentOptions {
+  /** 편집 중 문서 교체 확인창을 건너뜁니다. 기본 true */
+  skipUnsavedGuard?: boolean;
+}
+
+export interface CreateDocumentResult {
+  pageCount: number;
+}
+
+export interface InsertTextResult {
+  insertedChars: number;
+  pageCount: number;
+}
+
+export interface ReplaceSelectionResult {
+  replacedChars: number;
+  pageCount: number;
+}
+
+export interface ReplaceSelectionWithImageOptions {
+  /** 확장자 (기본 png) */
+  extension?: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  /** 대체 텍스트 설명에 쓸 파일 이름 */
+  fileName?: string;
+}
+
+export interface ReplaceSelectionWithImageResult {
+  inserted: boolean;
+  pageCount: number;
+  controlIndex?: number;
+}
+
 export declare class RhwpEditor {
   private constructor();
   /** HWP 파일을 로드합니다 */
@@ -178,6 +212,36 @@ export declare class RhwpEditor {
    * 스튜디오가 notify-saved-v1 capability를 광고하지 않으면 요청 없이 실패합니다.
    */
   notifySaved(fileName?: string): Promise<{ ok: true; wasDirty: boolean }>;
+  // ---- xyren-edit-v1 (스튜디오가 capability 를 광고할 때만 사용 가능) ----
+  /** 새 빈 문서를 생성합니다 */
+  createNewDocument(options?: CreateDocumentOptions): Promise<CreateDocumentResult>;
+  /** 현재 커서 위치에 일반 텍스트를 삽입합니다 (줄바꿈은 문단 분리) */
+  insertText(text: string): Promise<InsertTextResult>;
+  /** 선택 영역 존재 여부 */
+  hasSelection(): Promise<boolean>;
+  /** 현재 선택 범위 (없으면 null) */
+  getSelection(): Promise<unknown | null>;
+  /** 현재 선택 영역의 plain text */
+  getSelectedText(): Promise<string>;
+  /** 현재 선택 영역을 plain text 로 대체합니다 */
+  replaceSelection(text: string): Promise<ReplaceSelectionResult>;
+  /** 현재 본문 선택 영역을 이미지로 대체합니다 */
+  replaceSelectionWithImage(
+    data: ArrayBuffer | Uint8Array,
+    options?: ReplaceSelectionWithImageOptions,
+  ): Promise<ReplaceSelectionWithImageResult>;
+  /** linesegs 전체 재계산 */
+  reflowLinesegs(): Promise<{ reflowed: number; pageCount: number }>;
+  /** 미저장 변경 여부 (저장 완료 통지는 notifySaved) */
+  isDirty(): Promise<boolean>;
+  /** 구역의 문단 수 */
+  getParagraphCount(section?: number): Promise<number>;
+  /** 문단의 글자 수 */
+  getParagraphLength(section: number, para: number): Promise<number>;
+  /** 문단 텍스트 일부 */
+  getTextRange(section: number, para: number, charOffset: number, count: number): Promise<string>;
+  /** 지정 위치의 글자 서식 */
+  getCharPropertiesAt(section: number, para: number, charOffset: number): Promise<unknown>;
   /** iframe 엘리먼트를 반환합니다 */
   readonly element: HTMLIFrameElement;
   /** 에디터를 제거합니다 */

@@ -4,6 +4,7 @@ import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
 import { CanvasView } from '@/view/canvas-view';
 import { InputHandler } from '@/engine/input-handler';
+import { InsertTextCommand, SplitParagraphCommand } from '@/engine/command';
 import { Toolbar } from '@/ui/toolbar';
 import { MenuBar } from '@/ui/menu-bar';
 import { loadWebFonts, resolveCanvasKitFontPlan } from '@/core/font-loader';
@@ -1262,7 +1263,32 @@ async function createNewDocument(): Promise<void> {
   } catch (error) {
     msg.textContent = `새 문서 생성 실패: ${error}`;
     console.error('[main] 새 문서 생성 실패:', error);
+    // embed RPC 호출자가 실패를 성공으로 오인하지 않도록 다시 던진다.
+    throw error;
   }
+}
+
+/** 커서 위치에 plain text 삽입 (줄바꿈은 문단 분리) — embed RPC insertText 용. */
+function insertPlainText(text: string): { insertedChars: number; pageCount: number } {
+  if (!inputHandler) throw new Error('input handler is not ready');
+  if (!text) return { insertedChars: 0, pageCount: wasm.pageCount };
+
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]) {
+      inputHandler.executeOperation({
+        kind: 'command',
+        command: new InsertTextCommand(inputHandler.getCursorPosition(), lines[i]),
+      });
+    }
+    if (i < lines.length - 1) {
+      inputHandler.executeOperation({
+        kind: 'command',
+        command: new SplitParagraphCommand(inputHandler.getCursorPosition()),
+      });
+    }
+  }
+  return { insertedChars: text.length, pageCount: wasm.pageCount };
 }
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
@@ -1274,7 +1300,8 @@ eventBus.on('create-new-document', (payload) => {
   void (async () => {
     const options = payload as { skipUnsavedGuard?: boolean } | undefined;
     if (!await canReplaceCurrentDocument(options?.skipUnsavedGuard)) return;
-    await createNewDocument();
+    // 실패는 createNewDocument 안에서 이미 로그·상태바 처리됨 — 여기선 unhandled rejection 만 방지.
+    await createNewDocument().catch(() => {});
   })();
 });
 eventBus.on('open-document-bytes', async (payload) => {
@@ -1503,6 +1530,81 @@ installEmbedRuntime({
     async notifySaved(fileName) {
       await initPromise;
       return completeHostSave(fileName);
+    },
+    // ---- xyren-edit-v1: 호스트 주도 편집 표면 (craftnote AI 편집기 통합) ----
+    async createNewDocument(skipUnsavedGuard) {
+      await initPromise;
+      if (!await canReplaceCurrentDocument(skipUnsavedGuard)) {
+        throw new Error('문서 생성이 취소되었습니다.');
+      }
+      await createNewDocument();
+      return { pageCount: wasm.pageCount };
+    },
+    async insertText(text) {
+      await initPromise;
+      if (wasm.pageCount <= 0) {
+        await createNewDocument();
+      }
+      return insertPlainText(text);
+    },
+    async hasSelection() {
+      await initPromise;
+      return inputHandler?.hasSelection() ?? false;
+    },
+    async getSelection() {
+      await initPromise;
+      return inputHandler?.getSelectionRange() ?? null;
+    },
+    async getSelectedText() {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      return inputHandler.getSelectedText();
+    },
+    async replaceSelection(text) {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      const result = inputHandler.replaceSelectionText(text);
+      canvasView?.loadDocument();
+      return result;
+    },
+    async replaceSelectionWithImage(data, extension, naturalWidth, naturalHeight, fileName) {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      const result = inputHandler.replaceSelectionWithImage(
+        data, extension, naturalWidth, naturalHeight, fileName,
+      );
+      canvasView?.loadDocument();
+      return result;
+    },
+    async reflowLinesegs() {
+      await initPromise;
+      const reflowed = wasm.reflowLinesegs();
+      canvasView?.loadDocument();
+      return { reflowed, pageCount: wasm.pageCount };
+    },
+    // 호스트가 저장/다운로드 전에 미저장 여부를 읽는다 (영속은 호스트 소유 —
+    // 저장 완료 통지는 notifySaved 가 담당).
+    async isDirty() {
+      await initPromise;
+      return documentState.isDirty();
+    },
+    // op-capture 저장용 읽기 전용 게터 — 현재 문단 텍스트·글자 서식을 원본
+    // HWPX 와 diff 하기 위해 호스트가 조회한다.
+    async getParagraphCount(section) {
+      await initPromise;
+      return wasm.getParagraphCount(section);
+    },
+    async getParagraphLength(section, para) {
+      await initPromise;
+      return wasm.getParagraphLength(section, para);
+    },
+    async getTextRange(section, para, charOffset, count) {
+      await initPromise;
+      return wasm.getTextRange(section, para, charOffset, count);
+    },
+    async getCharPropertiesAt(section, para, charOffset) {
+      await initPromise;
+      return wasm.getCharPropertiesAt(section, para, charOffset);
     },
   },
 });

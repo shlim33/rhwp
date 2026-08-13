@@ -4,6 +4,9 @@ export const EMBED_CAPABILITIES = [
   'hml-export',
   'renderer-diagnostics-v1',
   'notify-saved-v1',
+  // 호스트 주도 편집 표면: createNewDocument/insertText/선택 조회·대체/
+  // reflowLinesegs/isDirty/문단 텍스트·서식 게터 (craftnote AI 편집기 통합)
+  'xyren-edit-v1',
 ] as const;
 
 export interface EmbedConnectAttempt {

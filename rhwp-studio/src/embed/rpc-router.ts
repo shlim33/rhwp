@@ -29,6 +29,26 @@ export interface EmbedRpcHandlers {
   getHmlSaveState(): Promise<HmlSaveState>;
   exportHwpVerify(): Promise<unknown>;
   notifySaved(fileName?: string): Promise<EmbedNotifySavedResult>;
+  // ---- xyren-edit-v1: 호스트 주도 편집 표면 (craftnote AI 편집기 통합) ----
+  createNewDocument(skipUnsavedGuard: boolean): Promise<{ pageCount: number }>;
+  insertText(text: string): Promise<{ insertedChars: number; pageCount: number }>;
+  hasSelection(): Promise<boolean>;
+  getSelection(): Promise<unknown>;
+  getSelectedText(): Promise<string>;
+  replaceSelection(text: string): Promise<{ replacedChars: number; pageCount: number }>;
+  replaceSelectionWithImage(
+    data: Uint8Array,
+    extension: string,
+    naturalWidth: number,
+    naturalHeight: number,
+    fileName: string,
+  ): Promise<{ inserted: boolean; pageCount: number; controlIndex?: number }>;
+  reflowLinesegs(): Promise<{ reflowed: number; pageCount: number }>;
+  isDirty(): Promise<boolean>;
+  getParagraphCount(section: number): Promise<number>;
+  getParagraphLength(section: number, para: number): Promise<number>;
+  getTextRange(section: number, para: number, charOffset: number, count: number): Promise<string>;
+  getCharPropertiesAt(section: number, para: number, charOffset: number): Promise<unknown>;
 }
 
 export interface EmbedRendererDiagnosticsV1 {
@@ -57,7 +77,7 @@ function asBytes(value: unknown, allowLegacyArray: boolean): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (allowLegacyArray && Array.isArray(value)) return new Uint8Array(value);
-  throw new Error('loadFile requires binary data');
+  throw new Error('binary data (Uint8Array/ArrayBuffer) is required');
 }
 
 export async function routeEmbedRequest(
@@ -96,6 +116,40 @@ export async function routeEmbedRequest(
       typeof params.fileName === 'string' && params.fileName.length > 0
         ? params.fileName
         : undefined,
+    );
+    // ---- xyren-edit-v1 ----
+    case 'createNewDocument': return handlers.createNewDocument(params.skipUnsavedGuard !== false);
+    case 'insertText': return handlers.insertText(String(params.text ?? ''));
+    case 'hasSelection': return handlers.hasSelection();
+    case 'getSelection': return handlers.getSelection();
+    case 'getSelectedText': return handlers.getSelectedText();
+    case 'replaceSelection': return handlers.replaceSelection(String(params.text ?? ''));
+    case 'replaceSelectionWithImage': return handlers.replaceSelectionWithImage(
+      asBytes(params.data, allowLegacyArray),
+      typeof params.extension === 'string' && params.extension ? params.extension : 'png',
+      typeof params.naturalWidth === 'number' ? params.naturalWidth : 1,
+      typeof params.naturalHeight === 'number' ? params.naturalHeight : 1,
+      typeof params.fileName === 'string' && params.fileName ? params.fileName : 'worksheet-ai-image.png',
+    );
+    case 'reflowLinesegs': return handlers.reflowLinesegs();
+    case 'isDirty': return handlers.isDirty();
+    case 'getParagraphCount': return handlers.getParagraphCount(
+      typeof params.section === 'number' ? params.section : 0,
+    );
+    case 'getParagraphLength': return handlers.getParagraphLength(
+      typeof params.section === 'number' ? params.section : 0,
+      typeof params.para === 'number' ? params.para : 0,
+    );
+    case 'getTextRange': return handlers.getTextRange(
+      typeof params.section === 'number' ? params.section : 0,
+      typeof params.para === 'number' ? params.para : 0,
+      typeof params.charOffset === 'number' ? params.charOffset : 0,
+      typeof params.count === 'number' ? params.count : 0,
+    );
+    case 'getCharPropertiesAt': return handlers.getCharPropertiesAt(
+      typeof params.section === 'number' ? params.section : 0,
+      typeof params.para === 'number' ? params.para : 0,
+      typeof params.charOffset === 'number' ? params.charOffset : 0,
     );
     default: throw new Error(`Unknown method: ${method}`);
   }
