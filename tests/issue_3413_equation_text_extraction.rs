@@ -52,3 +52,26 @@ fn markdown_includes_equation_scripts_from_table_cells() {
         "page 13 table markdown should preserve equation scripts: {markdown:?}"
     );
 }
+
+#[test]
+fn markdown_includes_floating_equation_script() {
+    // 떠 있는(문자처럼취급 아님) 수식은 TextLine 밖의 독립 렌더 노드라
+    // collect_markdown_items 의 기본 팔(`_ => {}`)로 떨어져 조용히 사라졌다.
+    // 표본: LADDER{...} 수식 하나가 본문("1111111111111")과 별도 앵커로 떠 있다.
+    for sample_name in [
+        "samples/수식-문자처럼취급-아님.hwp",
+        "samples/수식-문자처럼취급-아님.hwpx",
+    ] {
+        let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(sample_name);
+        let bytes = std::fs::read(&sample).unwrap_or_else(|_| panic!("read {sample_name}"));
+        let core =
+            DocumentCore::from_bytes(&bytes).unwrap_or_else(|_| panic!("parse {sample_name}"));
+        let markdown = core
+            .extract_page_markdown_native(0)
+            .expect("extract page 1 markdown");
+        assert!(
+            markdown.contains("LADDER"),
+            "{sample_name}: 떠 있는 수식 스크립트(LADDER)가 markdown 에 없음: {markdown:?}"
+        );
+    }
+}

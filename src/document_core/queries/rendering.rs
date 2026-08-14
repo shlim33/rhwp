@@ -6745,6 +6745,17 @@ impl DocumentCore {
                     }
                     return;
                 }
+                // 떠 있는(문자처럼취급 아님) 수식은 TextLine 밖의 독립 렌더 노드라
+                // collect_line_text 의 [#3413] 팔에 닿지 않는다 — 여기서 스크립트를
+                // 직접 방출하지 않으면 수식이 조용히 사라진다(TextLine 안 수식은
+                // TextLine 팔이 return 하므로 이 팔과 이중 방출되지 않는다).
+                RenderNodeType::Equation(eq_node) => {
+                    let script = eq_node.script.trim();
+                    if !script.is_empty() {
+                        items.push(MarkdownItem::Line(script.to_string()));
+                    }
+                    return;
+                }
                 _ => {}
             }
 
