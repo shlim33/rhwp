@@ -38,8 +38,9 @@ export class PdfPrintDialog extends ModalDialog {
 
     const summary = document.createElement('p');
     summary.className = 'dialog-pdf-summary';
+    // [xyren] 임베드 표면 무브랜드 — 제품명 없이 동작만 설명한다.
     summary.textContent =
-      'rhwp는 브라우저의 인쇄 기능을 사용해 검색 가능한 PDF를 만듭니다.';
+      '브라우저의 인쇄 기능을 사용해 검색 가능한 PDF를 만듭니다.';
 
     const guidance = document.createElement('div');
     guidance.className = 'dialog-pdf-guidance';
