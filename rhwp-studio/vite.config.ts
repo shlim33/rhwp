@@ -13,6 +13,9 @@ const subsecondWasmDir = resolve(
 const useSubsecondWasm = process.env.RHWP_SUBSECOND === '1';
 
 export default defineConfig({
+  // Craftnote/xyren-workspace 가 /rhwp-studio/ 하위에 정적 서빙하는 임베드 배포 —
+  // 절대 루트 자산 경로(/assets/…)는 호스트 앱 루트로 새서 부트가 깨진다.
+  base: '/rhwp-studio/',
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
     // 셀프 호스팅 빌드에서 외부(CDN) 웹폰트 로드를 빌드 시점에 끈다.
@@ -98,6 +101,11 @@ export default defineConfig({
     },
     VitePWA({
       registerType: 'autoUpdate',
+      // Craftnote embeds rhwp-studio in an iframe; the PWA service worker provides
+      // no value here and its CacheFirst WASM + precached bundle served stale assets
+      // after every rebuild (edits appeared not to take effect). selfDestroying emits
+      // a SW that unregisters itself and purges all caches, so deploys always apply.
+      selfDestroying: true,
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
         name: 'rhwp-studio',
@@ -107,11 +115,11 @@ export default defineConfig({
         theme_color: '#2b6cb0',
         background_color: '#ffffff',
         display: 'standalone',
-        start_url: '/rhwp/',
-        scope: '/rhwp/',
+        start_url: '/rhwp-studio/',
+        scope: '/rhwp-studio/',
         file_handlers: [
           {
-            action: '/rhwp/',
+            action: '/rhwp-studio/',
             accept: {
               'application/x-hwp': ['.hwp'],
               'application/hwp+zip': ['.hwpx'],
