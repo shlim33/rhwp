@@ -65,12 +65,22 @@ const wasm = new WasmBridge();
 const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
+// 임베드(iframe) 판정 — 채팅 패널처럼 **호스트가 문서 수명을 소유하는 표면**.
+// 자동복구(초안 생성 + 부팅 복구 팝업)는 독립 실행 전용이다:
+// ① 임베드에서는 저장·충돌 방지(base 대조·dirty 가드)를 호스트가 소유하므로
+//    스튜디오 자체 초안은 이중 장부다.
+// ② 복구 팝업은 지금 여는 문서와 무관한 **전역** IndexedDB 목록을 띄우므로,
+//    초안이 하나라도 남으면 임베드가 뜨는 **모든** 스레드에서 반복 출현한다
+//    (2026-08-15 채팅 실사용 신고 — 다른 스레드의 초안이 전 대화에 떴다).
+const isEmbeddedSurface = window.parent !== window;
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   schedule: autosaveScheduleFromUserSettings(),
   onStatus: handleAutosaveStatus,
 });
-autosaveManager.connect(eventBus);
+if (!isEmbeddedSurface) {
+  autosaveManager.connect(eventBus);
+}
 initThemeSync((effective, mode) => {
   eventBus.emit('theme-changed', { mode, effective });
   eventBus.emit('command-state-changed');
@@ -1210,6 +1220,8 @@ function shouldSkipInitialAutosaveRecovery(): boolean {
 }
 
 async function offerAutosaveRecoveryIfIdle(): Promise<void> {
+  // 임베드에서는 복구 팝업을 띄우지 않는다(위 isEmbeddedSurface 주석의 ①②).
+  if (isEmbeddedSurface) return;
   if (shouldSkipInitialAutosaveRecovery()) return;
 
   try {
