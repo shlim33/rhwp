@@ -990,17 +990,10 @@ fn parse_note_pr_children(
                                     }
                                 }
                                 b"color" => {
-                                    if let Ok(s) = std::str::from_utf8(&attr.value) {
-                                        // "#RRGGBB" → ColorRef (0xBBGGRR LE = HWP 표준)
-                                        if let Some(hex) = s.strip_prefix('#') {
-                                            if let Ok(rgb) = u32::from_str_radix(hex, 16) {
-                                                let r = (rgb >> 16) & 0xFF;
-                                                let g = (rgb >> 8) & 0xFF;
-                                                let b = rgb & 0xFF;
-                                                shape.separator_color = b << 16 | g << 8 | r;
-                                            }
-                                        }
-                                    }
+                                    // 색 정합 수리(2026-08-15): 공용 parse_color 경유 —
+                                    // HWPX 16진 숫자는 COLORREF 그대로(#BBGGRR, utils doc).
+                                    // 이 지점은 종전에 스왑을 인라인 복제하던 유일한 우회였다.
+                                    shape.separator_color = crate::parser::hwpx::utils::parse_color(&attr);
                                 }
                                 _ => {}
                             }

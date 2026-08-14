@@ -1206,17 +1206,15 @@ fn write_out_margin<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<()
 /// ColorRef (0xAABBGGRR) → "#RRGGBB" / "#AARRGGBB". 0xFFFFFFFF → "none".
 /// `parse_color_str` 의 역매핑 (header.rs `color_hex` 와 동일 규칙).
 pub(crate) fn color_to_hex(c: ColorRef) -> String {
+    // COLORREF 그대로 출력(#BBGGRR) — 색 정합 수리(2026-08-15, header.rs color_hex 동일 규칙).
     if c == 0xFFFFFFFF {
         return "none".to_string();
     }
     let a = ((c >> 24) & 0xFF) as u8;
-    let r = (c & 0xFF) as u8;
-    let g = ((c >> 8) & 0xFF) as u8;
-    let b = ((c >> 16) & 0xFF) as u8;
     if a == 0 {
-        format!("#{:02X}{:02X}{:02X}", r, g, b)
+        format!("#{:06X}", c & 0x00FF_FFFF)
     } else {
-        format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
+        format!("#{c:08X}")
     }
 }
 

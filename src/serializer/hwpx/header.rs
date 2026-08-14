@@ -561,20 +561,18 @@ fn border_width_mm(w: u8) -> &'static str {
 }
 
 fn color_hex(c: ColorRef) -> String {
-    // ColorRef = u32. HWP 내부 저장: 상위 바이트가 비투명 플래그(0이면 유효 색상).
-    // 0xFFFFFFFF = 투명/없음 센티넬 → "none"
+    // ColorRef = u32(COLORREF 0x00BBGGRR). 0xFFFFFFFF = 투명/없음 센티넬 → "none".
+    // 색 정합 수리(2026-08-15): HWPX 16진 숫자는 COLORREF **그대로**다(#BBGGRR —
+    // 한글 2014 실측, parser/hwpx/utils.rs::parse_color_str doc). 종전의 R↔B 스왑은
+    // 한글과 반대 색을 쓰게 했다.
     if c == 0xFFFFFFFF {
         return "none".to_string();
     }
-    // HWPX는 "#RRGGBB" 또는 "#AARRGGBB".
     let a = ((c >> 24) & 0xFF) as u8;
-    let r = (c & 0xFF) as u8;
-    let g = ((c >> 8) & 0xFF) as u8;
-    let b = ((c >> 16) & 0xFF) as u8;
     if a == 0 {
-        format!("#{:02X}{:02X}{:02X}", r, g, b)
+        format!("#{:06X}", c & 0x00FF_FFFF)
     } else {
-        format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
+        format!("#{c:08X}")
     }
 }
 

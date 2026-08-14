@@ -2828,9 +2828,8 @@ mod tests {
 
     #[test]
     fn test_parse_color_rgb() {
-        let attr_data = b"#FF0000";
-        // 빨강: RRGGBB → 0x000000FF (BBGGRR)
-        let xml = r##"<e color="#FF0000"/>"##.to_string();
+        // 색 정합 수리(2026-08-15): #0000FF = 한글이 빨강으로 그리는 값 = COLORREF 0x0000FF.
+        let xml = r##"<e color="#0000FF"/>"##.to_string();
         let mut reader = Reader::from_str(&xml);
         let mut buf = Vec::new();
         if let Ok(Event::Empty(ref e)) = reader.read_event_into(&mut buf) {
@@ -3024,9 +3023,10 @@ mod tests {
         assert_eq!(memo_records.len(), 1);
         assert_eq!(
             memo_records[0].data,
+            // 색 정합 수리(2026-08-15): HWPX 숫자 = COLORREF 그대로 → LE 바이트도 그대로.
             vec![
-                0xe7, 0x3c, 0x00, 0x00, 0x03, 0x05, 0xa9, 0xa9, 0xa9, 0x00, 0xfd, 0xfc, 0xc6, 0x00,
-                0xc0, 0xdb, 0xfb, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xe7, 0x3c, 0x00, 0x00, 0x03, 0x05, 0xa9, 0xa9, 0xa9, 0x00, 0xc6, 0xfc, 0xfd, 0x00,
+                0xfb, 0xdb, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
             ]
         );
     }
@@ -3533,7 +3533,8 @@ mod tests {
             bf.diagonal.diagonal_type, 1,
             "중심선도 diagonal 스타일 사용"
         );
-        assert_eq!(bf.diagonal.color, 0x00F4_C741);
+        // 색 정합 수리(2026-08-15): #41C7F4 = COLORREF 0x0041C7F4 그대로.
+        assert_eq!(bf.diagonal.color, 0x0041_C7F4);
     }
 
     #[test]

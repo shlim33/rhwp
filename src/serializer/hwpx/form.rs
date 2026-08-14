@@ -53,10 +53,8 @@ fn form_tag(form_type: FormType) -> &'static str {
 
 /// 모델 색(`0x00BBGGRR`) → HWPX `#RRGGBB`. `parse_color_str` 의 역방향.
 fn color_to_hex(color: u32) -> String {
-    let r = color & 0xFF;
-    let g = (color >> 8) & 0xFF;
-    let b = (color >> 16) & 0xFF;
-    format!("#{:02X}{:02X}{:02X}", r, g, b)
+    // COLORREF 그대로 출력(#BBGGRR) — 색 정합 수리(2026-08-15, header.rs color_hex 동일 규칙).
+    format!("#{:06X}", color & 0x00FF_FFFF)
 }
 
 fn prop<'a>(form: &'a FormObject, key: &str, default: &'a str) -> &'a str {
@@ -239,8 +237,8 @@ mod tests {
 
     #[test]
     fn color_inverts_parse_color_str() {
-        // parse_color_str("#1A2B3C") = 0x003C2B1A. 역변환은 "#1A2B3C".
-        assert_eq!(color_to_hex(0x003C2B1A), "#1A2B3C");
+        // 색 정합 수리(2026-08-15): 숫자 = COLORREF 그대로 — 역변환도 항등이다.
+        assert_eq!(color_to_hex(0x003C2B1A), "#3C2B1A");
         assert_eq!(color_to_hex(0x00F0F0F0), "#F0F0F0");
     }
 

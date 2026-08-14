@@ -79,34 +79,31 @@ pub fn parse_i32_wrapping(attr: &quick_xml::events::attributes::Attribute) -> i3
     0
 }
 
-/// "#RRGGBB" → 0x00BBGGRR, "#AARRGGBB" → 0xAABBGGRR (alpha 보존)
+/// HWPX 색 문자열 → HWP `ColorRef`(COLORREF `0x00BBGGRR`).
 pub fn parse_color(attr: &quick_xml::events::attributes::Attribute) -> u32 {
     let s = attr_str(attr);
     parse_color_str(&s)
 }
 
-/// 색상 문자열을 HWP ColorRef로 변환
+/// 색상 문자열을 HWP ColorRef로 변환.
+///
+/// ⚠️ 2026-08-15 정합 수리: HWPX 의 `#……` 16진 숫자는 **COLORREF 그대로**
+/// (`#BBGGRR`)다 — 데스크톱 한글 2014 실측(같은 문서의 textColor 만 바꾼 3파일:
+/// `#FF0000`→파랑, `#0000FF`→빨강, 대조군 `#00FF00`→초록 유지. HWP5 바이너리의
+/// `COLORREF = 0x00BBGGRR` 관습이 HWPX 문자열에 그대로 넘어온 것).
+/// 종전 구현은 문자열을 `#RRGGBB` 로 해석해 R↔B 를 스왑했고, 그 결과 한글이
+/// 빨강으로 그리는 문서를 rhwp 는 파랑으로 그렸다(HWP5·HML 경로는 처음부터
+/// COLORREF 그대로였다 — HWPX 문자열 계층만 갈라져 있던 것).
+/// 8자리는 상위 바이트(알파/센티널)를 포함해 그대로 읽는다 —
+/// `#FFFFFFFF` = `0xFFFFFFFF`(none 센티널)와 자연 일치.
 pub fn parse_color_str(s: &str) -> u32 {
     if s == "none" || s.is_empty() {
         return 0xFFFFFFFF; // 투명/없음
     }
     let hex = s.trim_start_matches('#');
-    if hex.len() == 6 {
-        // RRGGBB → 0x00BBGGRR
+    if hex.len() == 6 || hex.len() == 8 {
         if let Ok(v) = u32::from_str_radix(hex, 16) {
-            let r = (v >> 16) & 0xFF;
-            let g = (v >> 8) & 0xFF;
-            let b = v & 0xFF;
-            return b << 16 | g << 8 | r;
-        }
-    } else if hex.len() == 8 {
-        // AARRGGBB → 0xAABBGGRR (alpha 보존)
-        if let Ok(v) = u32::from_str_radix(hex, 16) {
-            let a = (v >> 24) & 0xFF;
-            let r = (v >> 16) & 0xFF;
-            let g = (v >> 8) & 0xFF;
-            let b = v & 0xFF;
-            return a << 24 | b << 16 | g << 8 | r;
+            return v;
         }
     }
     0x00000000 // 검정
@@ -183,19 +180,21 @@ mod tests {
 
     #[test]
     fn test_parse_color_str() {
-        assert_eq!(parse_color_str("#FF0000"), 0x000000FF); // 빨강 → R=FF → BGR=0000FF
-        assert_eq!(parse_color_str("#00FF00"), 0x0000FF00); // 초록
-        assert_eq!(parse_color_str("#0000FF"), 0x00FF0000); // 파랑
+        // 색 정합 수리(2026-08-15): HWPX 숫자 = COLORREF 그대로(#BBGGRR — 한글 실측).
+        assert_eq!(parse_color_str("#0000FF"), 0x000000FF); // 한글이 빨강으로 그리는 값
+        assert_eq!(parse_color_str("#00FF00"), 0x0000FF00); // 초록(대조군 — 스왑 불변)
+        assert_eq!(parse_color_str("#FF0000"), 0x00FF0000); // 한글이 파랑으로 그리는 값
         assert_eq!(parse_color_str("#000000"), 0x00000000); // 검정
         assert_eq!(parse_color_str("none"), 0xFFFFFFFF); // 투명
     }
 
     #[test]
     fn test_parse_color_str_with_alpha() {
-        // AARRGGBB → 0xAABBGGRR (alpha 보존)
-        assert_eq!(parse_color_str("#80FF0000"), 0x800000FF);
+        // 8자리도 그대로(상위 바이트 = 알파/센티널).
+        assert_eq!(parse_color_str("#800000FF"), 0x800000FF);
         assert_eq!(parse_color_str("#FF000000"), 0xFF000000); // 상위 바이트 비제로 → 채우기 없음
-        assert_eq!(parse_color_str("#00FF0000"), 0x000000FF); // alpha=00 → 동일
+        assert_eq!(parse_color_str("#000000FF"), 0x000000FF); // alpha=00 → 동일
+        assert_eq!(parse_color_str("#FFFFFFFF"), 0xFFFFFFFF); // none 센티널과 자연 일치
     }
 
     #[test]

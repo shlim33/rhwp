@@ -204,10 +204,8 @@ fn note_line_type_str(t: u8) -> &'static str {
 
 /// [#1984] separator_color(0xBBGGRR LE) → "#RRGGBB" (parser noteLine color 역매핑).
 fn note_color_hex(c: u32) -> String {
-    let r = c & 0xFF;
-    let g = (c >> 8) & 0xFF;
-    let b = (c >> 16) & 0xFF;
-    format!("#{r:02X}{g:02X}{b:02X}")
+    // COLORREF 그대로 출력(#BBGGRR) — 색 정합 수리(2026-08-15, header.rs color_hex 동일 규칙).
+    format!("#{:06X}", c & 0x00FF_FFFF)
 }
 
 /// [#1984] FootnoteShape → `<hp:noteLine .../>` + `<hp:noteSpacing .../>` 두 요소.
@@ -2560,18 +2558,15 @@ fn char_utf16_width(c: char) -> u32 {
 }
 
 fn color_ref_to_hwpx(color: u32) -> String {
+    // COLORREF 그대로 출력(#BBGGRR) — 색 정합 수리(2026-08-15, header.rs color_hex 동일 규칙).
     if color == 0xFFFFFFFF {
         return "none".to_string();
     }
-
     let a = (color >> 24) & 0xFF;
-    let r = color & 0xFF;
-    let g = (color >> 8) & 0xFF;
-    let b = (color >> 16) & 0xFF;
     if a == 0 {
-        format!("#{r:02X}{g:02X}{b:02X}")
+        format!("#{:06X}", color & 0x00FF_FFFF)
     } else {
-        format!("#{a:02X}{r:02X}{g:02X}{b:02X}")
+        format!("#{color:08X}")
     }
 }
 
