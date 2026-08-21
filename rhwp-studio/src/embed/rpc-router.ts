@@ -35,8 +35,10 @@ export interface EmbedRpcHandlers {
   hasSelection(): Promise<boolean>;
   getSelection(): Promise<unknown>;
   getSelectedText(): Promise<string>;
+  getSelectedContent(): Promise<{ text: string; html: string }>;
   /** 개체(그림 등) 선택 정보 — 텍스트 선택과 별개. 없으면 null. */
   getSelectedObject(): Promise<unknown>;
+  getSelectedImageData(): Promise<{ data: Uint8Array; mimeType: string }>;
   replaceSelection(text: string): Promise<{ replacedChars: number; pageCount: number }>;
   replaceSelectionWithImage(
     data: Uint8Array,
@@ -125,7 +127,9 @@ export async function routeEmbedRequest(
     case 'hasSelection': return handlers.hasSelection();
     case 'getSelection': return handlers.getSelection();
     case 'getSelectedText': return handlers.getSelectedText();
+    case 'getSelectedContent': return handlers.getSelectedContent();
     case 'getSelectedObject': return handlers.getSelectedObject();
+    case 'getSelectedImageData': return handlers.getSelectedImageData();
     case 'replaceSelection': return handlers.replaceSelection(String(params.text ?? ''));
     case 'replaceSelectionWithImage': return handlers.replaceSelectionWithImage(
       asBytes(params.data, allowLegacyArray),
