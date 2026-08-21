@@ -11,6 +11,33 @@ fn test_create_empty_document() {
     assert_eq!(doc.page_count(), 1);
 }
 
+#[test]
+fn blank_hwpx_document_uses_standard_typography_and_reopens_as_hwpx() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_hwpx_document_native()
+        .expect("신규 HWPX 생성");
+    assert_eq!(doc.get_source_format(), "hwpx");
+
+    let char_props: Value = serde_json::from_str(
+        &doc.get_char_properties_at_native(0, 0, 0)
+            .expect("기본 글자 속성"),
+    )
+    .expect("글자 속성 JSON");
+    let para_props: Value = serde_json::from_str(
+        &doc.get_para_properties_at_native(0, 0)
+            .expect("기본 문단 속성"),
+    )
+    .expect("문단 속성 JSON");
+    assert_eq!(char_props["fontSize"].as_i64(), Some(1000));
+    assert_eq!(char_props["ratios"], serde_json::json!([100, 100, 100, 100, 100, 100, 100]));
+    assert_eq!(char_props["spacings"], serde_json::json!([0, 0, 0, 0, 0, 0, 0]));
+    assert_eq!(para_props["lineSpacing"].as_f64(), Some(160.0));
+
+    let bytes = doc.export_hwpx_native().expect("신규 HWPX 저장");
+    let reopened = HwpDocument::from_bytes(&bytes).expect("신규 HWPX 재개방");
+    assert_eq!(reopened.get_source_format(), "hwpx");
+}
+
 /// [#1386] createEmpty는 구역 1개 + 빈 문단 1개를 포함해 생성 직후
 /// 편집/조회/내보내기가 가능해야 한다 (구역 0개 → 모든 API 실패 회귀 방지).
 #[test]
@@ -721,6 +748,28 @@ fn issue_1481_create_table_keeps_first_line_mark_for_escape() {
         marks_above_table_after.is_empty(),
         "Enter 후에도 표 위에 별도 빈 줄 조판부호가 있으면 안 된다: table_y={table_y_after}, marks={marks_above_table_after:?}, all={outside_marks_after:?}"
     );
+}
+
+#[test]
+fn table_at_document_end_arrow_down_lands_after_table_host_control() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_table_ex_native(0, 0, 0, 2, 2, true, None, None)
+        .expect("글자처럼 취급하는 2x2 표 생성");
+    assert_eq!(doc.document.sections[0].paragraphs.len(), 1);
+
+    let moved = doc
+        .move_vertical(0, 0, 0, 1, 0.0, 0, 0, 3, 0)
+        .expect("마지막 셀에서 아래쪽 이동");
+    let moved: Value = serde_json::from_str(&moved).expect("moveVertical JSON");
+    assert_eq!(moved["paragraphIndex"].as_u64(), Some(0));
+    assert_eq!(moved["charOffset"].as_u64(), Some(1));
+    assert!(moved.get("parentParaIndex").is_none());
+
+    doc.split_paragraph_native(0, 0, 1, None)
+        .expect("표 뒤 위치에서 Enter");
+    doc.insert_text_native(0, 1, 0, "표 아래 본문")
+        .expect("표 아래 새 문단에 텍스트 입력");
+    assert_eq!(doc.document.sections[0].paragraphs[1].text, "표 아래 본문");
 }
 
 #[test]

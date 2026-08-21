@@ -1585,9 +1585,9 @@ export class CursorState {
       const paraCount = this.wasm.getParagraphCount(sec);
       if (ppi + 1 < paraCount) {
         this.position = { sectionIndex: sec, paragraphIndex: ppi + 1, charOffset: 0 };
-      } else if (ppi > 0) {
-        const prevLen = this.wasm.getParagraphLength(sec, ppi - 1);
-        this.position = { sectionIndex: sec, paragraphIndex: ppi - 1, charOffset: prevLen };
+      } else {
+        const paraLen = this.wasm.getParagraphLength(sec, ppi);
+        this.position = { sectionIndex: sec, paragraphIndex: ppi, charOffset: paraLen };
       }
     }
     this.exitTableObjectSelection();

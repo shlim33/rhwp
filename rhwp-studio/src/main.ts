@@ -1261,17 +1261,17 @@ async function restoreAutosaveDraft(draft: AutosaveDraft): Promise<void> {
 }
 
 
-async function createNewDocument(): Promise<void> {
+async function createNewDocument(format: 'hwp' | 'hwpx' = 'hwpx'): Promise<void> {
   const msg = sbMessage();
   try {
     msg.textContent = '새 문서 생성 중...';
-    const docInfo = wasm.createNewDocument();
+    const docInfo = wasm.createNewDocument(format);
     prepareCanvasRendererDocument();
     await autosaveManager.beginDocument(
       { fileName: wasm.fileName, sourceFormat: wasm.getSourceFormat() },
       { discardPreviousDraft: true },
     );
-    await initializeDocument(docInfo, `새 문서.hwp — ${docInfo.pageCount}페이지`);
+    await initializeDocument(docInfo, `${wasm.fileName} — ${docInfo.pageCount}페이지`);
   } catch (error) {
     msg.textContent = `새 문서 생성 실패: ${error}`;
     console.error('[main] 새 문서 생성 실패:', error);
@@ -1310,10 +1310,13 @@ async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<bo
 // 커맨드에서 새 문서 생성 호출
 eventBus.on('create-new-document', (payload) => {
   void (async () => {
-    const options = payload as { skipUnsavedGuard?: boolean } | undefined;
+    const options = payload as {
+      skipUnsavedGuard?: boolean;
+      format?: 'hwp' | 'hwpx';
+    } | undefined;
     if (!await canReplaceCurrentDocument(options?.skipUnsavedGuard)) return;
     // 실패는 createNewDocument 안에서 이미 로그·상태바 처리됨 — 여기선 unhandled rejection 만 방지.
-    await createNewDocument().catch(() => {});
+    await createNewDocument(options?.format ?? 'hwpx').catch(() => {});
   })();
 });
 eventBus.on('open-document-bytes', async (payload) => {

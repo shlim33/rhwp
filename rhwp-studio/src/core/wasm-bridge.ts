@@ -469,14 +469,18 @@ export class WasmBridge {
     return this.doc != null;
   }
 
-  createNewDocument(): DocumentInfo {
+  createNewDocument(format: 'hwp' | 'hwpx' = 'hwp'): DocumentInfo {
     if (!this.doc) {
       // 아직 WASM 객체가 없으면 더미로 생성 (createEmpty → 즉시 교체)
       this.doc = HwpDocument.createEmpty();
     }
-    const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
+    const info: DocumentInfo = JSON.parse(
+      format === 'hwpx'
+        ? this.doc.createBlankHwpxDocument()
+        : this.doc.createBlankDocument(),
+    );
     this.ensureParagraphStableIds();
-    this._fileName = '새 문서.hwp';
+    this._fileName = format === 'hwpx' ? '새 문서.hwpx' : '새 문서.hwp';
     this._currentFileHandle = null;
     this._requiresPasswordForSave = false;
     this.doc.setFileName(this._fileName);
@@ -524,7 +528,7 @@ export class WasmBridge {
   }
 
   get isNewDocument(): boolean {
-    return this._fileName === '새 문서.hwp';
+    return this._fileName === '새 문서.hwp' || this._fileName === '새 문서.hwpx';
   }
 
   /**

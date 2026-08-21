@@ -1648,8 +1648,13 @@ impl DocumentCore {
             if sec + 1 < self.document.sections.len() {
                 return self.enter_paragraph(sec + 1, 0, delta, preferred_x);
             }
-            // 문서 끝 — 표 마지막 위치 유지
-            Ok((sec, 0, 0, None))
+            // 문서 끝 — 표를 글자처럼 취급하여 표 바로 뒤 위치로 탈출한다.
+            let offset = section
+                .paragraphs
+                .get(ppi)
+                .map(navigable_text_len)
+                .unwrap_or(0);
+            Ok((sec, ppi, offset, None))
         } else {
             Ok((sec, ppi, 0, None))
         }

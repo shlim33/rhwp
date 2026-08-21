@@ -665,7 +665,7 @@ export const fileCommands: CommandDef[] = [
     shortcutLabel: 'Alt+N',
     canExecute: () => true,
     execute(services) {
-      services.eventBus.emit('create-new-document');
+      services.eventBus.emit('create-new-document', { format: 'hwpx' });
     },
   },
   {
