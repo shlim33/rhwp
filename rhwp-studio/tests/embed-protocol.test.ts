@@ -836,3 +836,27 @@ test('embed router는 notifySaved fileName을 정규화해 핸들러로 전달�
 
   assert.deepEqual(received, [undefined, 'a.hwp', undefined, undefined]);
 });
+
+test('embed router는 구조화 선택과 선택 그림 바이트를 손실 없이 전달한다', async () => {
+  const selectedContent = {
+    text: '도입 이름 점수 결론',
+    html: '<p>도입</p><table><tr><td>이름</td><td>점수</td></tr></table><p>결론</p>',
+  };
+  const selectedImage = {
+    data: new Uint8Array([137, 80, 78, 71]),
+    mimeType: 'image/png',
+  };
+  const handlers = {
+    getSelectedContent: async () => selectedContent,
+    getSelectedImageData: async () => selectedImage,
+  } as EmbedRpcHandlers;
+
+  assert.deepEqual(
+    await routeEmbedRequest('getSelectedContent', {}, handlers),
+    selectedContent,
+  );
+  assert.deepEqual(
+    await routeEmbedRequest('getSelectedImageData', {}, handlers),
+    selectedImage,
+  );
+});

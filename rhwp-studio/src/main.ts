@@ -1572,9 +1572,19 @@ installEmbedRuntime({
       if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
       return inputHandler.getSelectedText();
     },
+    async getSelectedContent() {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      return inputHandler.getSelectedContent();
+    },
     async getSelectedObject() {
       await initPromise;
       return inputHandler?.getSelectedObjectInfo() ?? null;
+    },
+    async getSelectedImageData() {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      return inputHandler.getSelectedImageData();
     },
     async replaceSelection(text) {
       await initPromise;

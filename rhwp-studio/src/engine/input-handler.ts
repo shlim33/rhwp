@@ -4029,6 +4029,45 @@ export class InputHandler {
     };
   }
 
+  /** 현재 텍스트 선택을 plain text와 구조 보존 HTML로 함께 반환한다. 본문 범위의
+   * HTML에는 선택 사이의 표가 `<table>`로 남으므로 호스트가 행·열 구조를 잃지
+   * 않고 채팅 컨텍스트로 축약할 수 있다. */
+  getSelectedContent(): { text: string; html: string } {
+    const sel = this.getNonEmptySelection();
+    if (!sel) return { text: '', html: '' };
+    const { start, end } = sel;
+    this.assertTextSelectionRange(start, end);
+    const text = this.getSelectedText();
+    if (start.parentParaIndex !== undefined) {
+      const html = this.wasm.exportSelectionInCellHtml(
+        start.sectionIndex, start.parentParaIndex, start.controlIndex!, start.cellIndex!,
+        start.cellParaIndex!, start.charOffset, end.cellParaIndex!, end.charOffset,
+      );
+      return { text, html };
+    }
+    return {
+      text,
+      html: this.wasm.exportSelectionHtml(
+        start.sectionIndex, start.paragraphIndex, start.charOffset,
+        end.paragraphIndex, end.charOffset,
+      ),
+    };
+  }
+
+  /** 선택된 그림의 원본 바이트와 MIME. 그림 이외 개체 또는 선택 부재는 명시 실패한다. */
+  getSelectedImageData(): { data: Uint8Array; mimeType: string } {
+    if (!this.cursor.isInPictureObjectSelection()) {
+      throw new Error('선택된 그림이 없습니다.');
+    }
+    const ref = this.cursor.getSelectedPictureRef();
+    if (!ref || ref.type !== 'image') throw new Error('선택된 개체가 그림이 아닙니다.');
+    const cellPathJson = ref.cellPath?.length ? JSON.stringify(ref.cellPath) : '';
+    return {
+      data: this.wasm.getControlImageData(ref.sec, ref.ppi, ref.ci, cellPathJson),
+      mimeType: this.wasm.getControlImageMime(ref.sec, ref.ppi, ref.ci, cellPathJson),
+    };
+  }
+
   private assertTextSelectionRange(start: DocumentPosition, end: DocumentPosition): void {
     if (start.sectionIndex !== end.sectionIndex) {
       throw new Error('AI 대체는 같은 구역 안의 텍스트 선택만 지원합니다.');
@@ -4176,6 +4215,15 @@ export class InputHandler {
         );
         if (!result.ok) throw new Error('이미지 삽입에 실패했습니다.');
         controlIndex = result.controlIdx;
+        const inlineResult = wasm.setPictureProperties(
+          insertAt.sectionIndex,
+          result.paraIdx ?? insertAt.paragraphIndex,
+          result.controlIdx,
+          { treatAsChar: true },
+        );
+        if (!inlineResult.ok) {
+          throw new Error('삽입한 이미지를 글자처럼 배치하지 못했습니다.');
+        }
         return {
           sectionIndex: insertAt.sectionIndex,
           paragraphIndex: result.paraIdx + 1,
