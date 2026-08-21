@@ -1148,6 +1148,15 @@ impl DocumentCore {
         Ok(self.get_document_info())
     }
 
+    /// 내장 한글 빈 문서 템플릿을 기반으로 신규 HWPX 문서를 생성한다.
+    pub fn create_blank_hwpx_document_native(&mut self) -> Result<String, HwpError> {
+        self.create_blank_document_native()?;
+        let bytes = self.export_hwpx_native()?;
+        let reopened = Self::from_bytes(&bytes)?;
+        *self = reopened;
+        Ok(self.get_document_info())
+    }
+
     /// Document IR을 HWP 5.0 CFB 바이너리로 직렬화 (네이티브 에러 타입)
     pub fn export_hwp_native(&self) -> Result<Vec<u8>, HwpError> {
         crate::serializer::serialize_document(&self.document)

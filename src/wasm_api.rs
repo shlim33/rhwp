@@ -630,6 +630,13 @@ impl HwpDocument {
         self.create_blank_document_native().map_err(|e| e.into())
     }
 
+    /// 내장 표준 템플릿에서 신규 HWPX 문서를 생성한다.
+    #[wasm_bindgen(js_name = createBlankHwpxDocument)]
+    pub fn create_blank_hwpx_document(&mut self) -> Result<String, JsValue> {
+        self.create_blank_hwpx_document_native()
+            .map_err(|e| e.into())
+    }
+
     /// 문단부호(¶) 표시 여부를 설정한다.
     #[wasm_bindgen(js_name = setShowParagraphMarks)]
     pub fn set_show_paragraph_marks(&mut self, enabled: bool) {
