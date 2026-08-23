@@ -1570,6 +1570,11 @@ installEmbedRuntime({
       await initPromise;
       return inputHandler?.getSelectionRange() ?? null;
     },
+    async getCursorPosition() {
+      await initPromise;
+      if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
+      return inputHandler.getCursorPosition();
+    },
     async getSelectedText() {
       await initPromise;
       if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
