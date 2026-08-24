@@ -32,12 +32,34 @@ runTest('xyren 신규 HWPX 마지막 표 아래 입력', async ({ page }) => {
   assert.equal(created.paragraphCount, 1);
   assert.equal(created.result.ok, true);
 
+  await page.keyboard.type('값3');
+  await sleep(page, 100);
+  const filledCell = await page.evaluate(() => window.__inputHandler.cursor.getPosition());
+  assert.equal(filledCell.charOffset, 2);
+
   await page.keyboard.press('ArrowDown');
   await sleep(page, 150);
   const escaped = await page.evaluate(() => window.__inputHandler.cursor.getPosition());
   assert.equal(escaped.paragraphIndex, 0);
   assert.equal(escaped.charOffset, 1);
   assert.equal(escaped.parentParaIndex, undefined);
+
+  // 줄 끝 affinity가 설정된 End 뒤에도 같은 구조적 경계에서 빠져나와야 한다.
+  await page.evaluate(({ paraIdx, controlIdx }) => {
+    window.__inputHandler.cursor.moveTo({
+      sectionIndex: 0, paragraphIndex: 0, charOffset: 2,
+      parentParaIndex: paraIdx, controlIndex: controlIdx,
+      cellIndex: 3, cellParaIndex: 0,
+    });
+    window.__inputHandler.focus();
+  }, created.result);
+  await page.keyboard.press('End');
+  await page.keyboard.press('ArrowDown');
+  await sleep(page, 150);
+  const escapedAfterEnd = await page.evaluate(() => window.__inputHandler.cursor.getPosition());
+  assert.equal(escapedAfterEnd.paragraphIndex, 0);
+  assert.equal(escapedAfterEnd.charOffset, 1);
+  assert.equal(escapedAfterEnd.parentParaIndex, undefined);
 
   await page.keyboard.press('Enter');
   await page.keyboard.type('표 아래 본문');

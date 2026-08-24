@@ -583,8 +583,74 @@ export class CursorState {
 
   // ─── 수직 이동 (ArrowUp/Down) ──────────────────────────
 
+  /**
+   * 최상위 표의 마지막 셀·마지막 문단·마지막 시각 줄에서 ArrowDown이면
+   * 표 컨트롤 바로 뒤의 본문 위치로 이동한다.
+   *
+   * 빈 셀은 native moveVertical도 이 경계를 반환하지만, 실제 작성 문서처럼
+   * 마지막 셀에 텍스트가 있으면 같은 셀 offset을 반환해 커서가 갇힐 수 있다.
+   * 셀/문단/줄/컨트롤 위치를 모두 구조적으로 확인한 경우에만 처리하고,
+   * 중첩 표와 글상자는 기존 native 경로에 맡긴다.
+   */
+  private tryExitTopLevelTerminalTableDown(): boolean {
+    const pos = this.position;
+    if (!this.isInCell() || this.isInTextBox() || (pos.cellPath?.length ?? 0) > 1) {
+      return false;
+    }
+    const { sectionIndex: sec, parentParaIndex: ppi, controlIndex: ci } = pos;
+    const cellIndex = pos.cellPath?.[0]?.cellIndex ?? pos.cellIndex;
+    const cellParaIndex = pos.cellPath?.[0]?.cellParaIndex ?? pos.cellParaIndex;
+    if (ppi === undefined || ci === undefined || cellIndex === undefined || cellParaIndex === undefined) {
+      return false;
+    }
+
+    try {
+      const readingOrder = this.getCellReadingOrder();
+      if (readingOrder.length === 0 || readingOrder[readingOrder.length - 1] !== cellIndex) {
+        return false;
+      }
+
+      let cellParaCount: number;
+      let cellParaLength: number;
+      if ((pos.cellPath?.length ?? 0) === 1) {
+        const pathJson = JSON.stringify(pos.cellPath);
+        cellParaCount = this.wasm.getCellParagraphCountByPath(sec, ppi, pathJson);
+        cellParaLength = this.wasm.getCellParagraphLengthByPath(sec, ppi, pathJson);
+      } else {
+        cellParaCount = this.wasm.getCellParagraphCount(sec, ppi, ci, cellIndex);
+        cellParaLength = this.wasm.getCellParagraphLength(sec, ppi, ci, cellIndex, cellParaIndex);
+      }
+      if (cellParaCount <= 0 || cellParaIndex !== cellParaCount - 1) return false;
+
+      const lineInfo = this.getLineInfoForOffset(
+        pos,
+        Math.min(pos.charOffset, cellParaLength),
+      );
+      if (lineInfo.charEnd !== cellParaLength) return false;
+
+      const controlPositions = this.wasm.getControlTextPositions(sec, ppi);
+      const controlOffset = controlPositions[ci];
+      if (!Number.isFinite(controlOffset)) return false;
+      this.position = {
+        sectionIndex: sec,
+        paragraphIndex: ppi,
+        // 인라인 컨트롤은 본문 커서 offset 하나를 차지하지만 getParagraphLength의
+        // 평문 길이에는 포함되지 않는다. 따라서 평문 길이로 clamp하지 않는다.
+        charOffset: Math.max(0, controlOffset + 1),
+      };
+      this.preferredX = null;
+      this.atLineEnd = false;
+      this.updateRect();
+      return true;
+    } catch (e) {
+      console.warn('[CursorState] terminal table ArrowDown 탈출 판정 실패:', e);
+      return false;
+    }
+  }
+
   /** 커서를 위/아래로 이동한다 (delta: -1=위, +1=아래) — WASM 단일 호출 */
   moveVertical(delta: number): void {
+    if (delta > 0 && this.tryExitTopLevelTerminalTableDown()) return;
     const wasAtLineEnd = this.atLineEnd;
     this.atLineEnd = false;
     let px = this.preferredX ?? this.rect?.x ?? -1.0;
