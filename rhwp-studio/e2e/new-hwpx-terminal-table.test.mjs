@@ -76,6 +76,16 @@ runTest('xyren 신규 HWPX 마지막 표 아래 입력', async ({ page }) => {
   assert.equal(after.count, 2);
   assert.equal(after.text, '표 아래 본문');
 
+  // 본문 범위 선택은 그 사이의 표를 평문에서 조용히 누락하지 않고 구조 HTML로
+  // 내보낸다. 채팅 호스트는 이 HTML을 작은 TSV 컨텍스트로 축약한다.
+  await page.keyboard.down('Control');
+  await page.keyboard.press('a');
+  await page.keyboard.up('Control');
+  const mixedSelection = await page.evaluate(() => window.__inputHandler.getSelectedContent());
+  assert.equal(mixedSelection.text.includes('표 아래 본문'), true);
+  assert.equal(mixedSelection.html.includes('<table'), true);
+  assert.equal(mixedSelection.html.includes('값3'), true);
+
   // embed 호스트 좌표는 편집기 내부 logical offset이 아니라 UTF-16 평문 offset이다.
   // surrogate pair 두 개와 inline table slot이 함께 있어도 둘을 각각 정확히 변환한다.
   await createNewDocument(page);

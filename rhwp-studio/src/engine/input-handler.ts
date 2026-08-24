@@ -61,6 +61,27 @@ const DOCUMENT_PAGINATION_INITIAL_START_DELAY_MS = 100;
 const DOCUMENT_PAGINATION_RESTART_COALESCE_DELAY_MS = 200;
 // 첫 fragment 하나 뒤 다음 입력과 후속 step이 겹치지 않게 하는 짧은 settle gap.
 const DOCUMENT_PAGINATION_POST_FIRST_STEP_DELAY_MS = 25;
+const CLIPBOARD_FRAGMENT_START = '<!--StartFragment-->';
+const CLIPBOARD_FRAGMENT_END = '<!--EndFragment-->';
+
+/** WASM clipboard HTML의 명시적 fragment 경계 안쪽만 합성용으로 꺼낸다. */
+function extractClipboardFragment(html: string): string {
+  const start = html.indexOf(CLIPBOARD_FRAGMENT_START);
+  const end = html.indexOf(CLIPBOARD_FRAGMENT_END);
+  if (start < 0 || end < start) {
+    throw new Error('클립보드 HTML fragment 경계가 없습니다.');
+  }
+  return html.slice(start + CLIPBOARD_FRAGMENT_START.length, end);
+}
+
+/** 컨트롤 HTML이 최상위 표일 때만 표 조각을 돌려준다. 그림·구역 속성 등은
+ * 선택 평문과 중복되거나 채팅 표 구조에 불필요하므로 포함하지 않는다. */
+function extractRootTableFragment(html: string): string | null {
+  const fragment = extractClipboardFragment(html);
+  const doc = new DOMParser().parseFromString(fragment, 'text/html');
+  const table = Array.from(doc.body.children).find((element) => element.tagName === 'TABLE');
+  return table ? `${table.outerHTML}\n` : null;
+}
 /**
  * [#3412] idle 자동 flush 대상 문서 크기 상한.
  *
@@ -4063,11 +4084,65 @@ export class InputHandler {
     }
     return {
       text,
-      html: this.wasm.exportSelectionHtml(
-        start.sectionIndex, start.paragraphIndex, start.charOffset,
-        end.paragraphIndex, end.charOffset,
-      ),
+      html: this.exportBodySelectionHtml(start, end),
     };
+  }
+
+  /**
+   * 본문 선택의 문단과 그 사이 컨트롤을 문서 순서로 HTML에 담는다.
+   *
+   * WASM의 기존 `exportSelectionHtml`은 평문만 내보내므로 표 앵커 문단이 선택
+   * 범위 안이어도 표를 누락한다. 완전히 선택됐음을 좌표로 증명할 수 있는 문단만
+   * 컨트롤 HTML을 포함한다. 부분 경계 문단의 개체 포함 여부는 추측하지 않는다.
+   */
+  private exportBodySelectionHtml(start: DocumentPosition, end: DocumentPosition): string {
+    const sec = start.sectionIndex;
+    const fragments: string[] = [];
+    for (let para = start.paragraphIndex; para <= end.paragraphIndex; para += 1) {
+      const rawStart = para === start.paragraphIndex ? start.charOffset : 0;
+      const logicalLength = this.wasm.getLogicalLength(sec, para);
+      const rawEnd = para === end.paragraphIndex ? end.charOffset : logicalLength;
+      const textStart = this.wasm.logicalToTextOffset(sec, para, rawStart);
+      const textEnd = this.wasm.logicalToTextOffset(sec, para, rawEnd);
+
+      const wholeParagraphSelected = rawStart === 0 && rawEnd >= logicalLength;
+      if (!wholeParagraphSelected) {
+        fragments.push(extractClipboardFragment(this.wasm.exportSelectionHtml(
+          sec, para, textStart, para, textEnd,
+        )));
+        continue;
+      }
+
+      const controlPositions = this.wasm.getControlTextPositions(sec, para);
+      const tables: Array<{ position: number; control: number; html: string }> = [];
+      const controlCount = controlPositions.length;
+      for (let control = 0; control < controlCount; control += 1) {
+        const table = extractRootTableFragment(
+          this.wasm.exportControlHtml(sec, para, control),
+        );
+        if (table) {
+          tables.push({
+            position: controlPositions[control] ?? 0,
+            control,
+            html: table,
+          });
+        }
+      }
+      tables.sort((left, right) => left.position - right.position || left.control - right.control);
+      let cursor = 0;
+      for (const table of tables) {
+        const position = Math.max(cursor, Math.min(table.position, textEnd));
+        fragments.push(extractClipboardFragment(this.wasm.exportSelectionHtml(
+          sec, para, cursor, para, position,
+        )));
+        fragments.push(table.html);
+        cursor = position;
+      }
+      fragments.push(extractClipboardFragment(this.wasm.exportSelectionHtml(
+        sec, para, cursor, para, textEnd,
+      )));
+    }
+    return `<html><body>\n<!--StartFragment-->\n${fragments.join('')}<!--EndFragment-->\n</body></html>`;
   }
 
   /** 선택된 그림의 원본 바이트와 MIME. 그림 이외 개체 또는 선택 부재는 명시 실패한다. */
