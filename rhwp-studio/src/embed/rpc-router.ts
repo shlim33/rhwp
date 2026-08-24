@@ -34,6 +34,8 @@ export interface EmbedRpcHandlers {
   insertText(text: string): Promise<{ insertedChars: number; pageCount: number }>;
   hasSelection(): Promise<boolean>;
   getSelection(): Promise<unknown>;
+  /** 비어 있지 않은 선택이 없어도 현재 본문 커서 좌표를 반환한다. */
+  getCursorPosition(): Promise<unknown>;
   getSelectedText(): Promise<string>;
   getSelectedContent(): Promise<{ text: string; html: string }>;
   /** 개체(그림 등) 선택 정보 — 텍스트 선택과 별개. 없으면 null. */
@@ -126,6 +128,7 @@ export async function routeEmbedRequest(
     case 'insertText': return handlers.insertText(String(params.text ?? ''));
     case 'hasSelection': return handlers.hasSelection();
     case 'getSelection': return handlers.getSelection();
+    case 'getCursorPosition': return handlers.getCursorPosition();
     case 'getSelectedText': return handlers.getSelectedText();
     case 'getSelectedContent': return handlers.getSelectedContent();
     case 'getSelectedObject': return handlers.getSelectedObject();
