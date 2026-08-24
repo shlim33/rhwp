@@ -75,4 +75,35 @@ runTest('xyren 신규 HWPX 마지막 표 아래 입력', async ({ page }) => {
   });
   assert.equal(after.count, 2);
   assert.equal(after.text, '표 아래 본문');
+
+  // embed 호스트 좌표는 편집기 내부 logical offset이 아니라 UTF-16 평문 offset이다.
+  // surrogate pair 두 개와 inline table slot이 함께 있어도 둘을 각각 정확히 변환한다.
+  await createNewDocument(page);
+  const hostFixture = await page.evaluate(() => {
+    const bridge = window.__wasm;
+    bridge.doc.insertTextLogical(0, 0, 0, 'A😀😀B');
+    const table = JSON.parse(bridge.doc.createTableEx(JSON.stringify({
+      sectionIdx: 0, paraIdx: 0, charOffset: 4,
+      rowCount: 1, colCount: 1, treatAsChar: true,
+    })));
+    window.__inputHandler.cursor.moveTo({
+      sectionIndex: 0, paragraphIndex: 0, charOffset: 0,
+    });
+    window.__inputHandler.focus();
+    return table;
+  });
+  assert.equal(hostFixture.ok, true);
+  await page.keyboard.press('Home');
+  await page.keyboard.down('Shift');
+  await page.keyboard.press('End');
+  await page.keyboard.up('Shift');
+  const hostSelection = await page.evaluate(() => ({
+    raw: window.__inputHandler.getSelectionRange(),
+    host: window.__inputHandler.getHostSelectionRange(),
+    text: window.__inputHandler.getSelectedText(),
+  }));
+  assert.equal(hostSelection.text, 'A😀😀B');
+  assert.equal(hostSelection.host.start.charOffset, 0);
+  assert.equal(hostSelection.host.end.charOffset, 'A😀😀B'.length);
+  assert.notEqual(hostSelection.raw.end.charOffset, hostSelection.host.end.charOffset);
 }, { skipLoadApp: true });

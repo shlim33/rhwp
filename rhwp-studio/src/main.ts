@@ -1568,12 +1568,12 @@ installEmbedRuntime({
     },
     async getSelection() {
       await initPromise;
-      return inputHandler?.getSelectionRange() ?? null;
+      return inputHandler?.getHostSelectionRange() ?? null;
     },
     async getCursorPosition() {
       await initPromise;
       if (!inputHandler) throw new Error('편집기가 준비되지 않았습니다.');
-      return inputHandler.getCursorPosition();
+      return inputHandler.getHostCursorPosition();
     },
     async getSelectedText() {
       await initPromise;

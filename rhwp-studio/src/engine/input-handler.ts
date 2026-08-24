@@ -4007,6 +4007,22 @@ export class InputHandler {
     return this.getNonEmptySelection();
   }
 
+  /**
+   * embed 호스트에 전달할 본문 선택 범위.
+   *
+   * 내부 커서 좌표(Unicode scalar + inline control slot)는 편집 동작에 그대로 두고,
+   * 본문 위치만 외부 API 계약인 UTF-16 텍스트 좌표로 변환한다. 셀/글상자 위치는
+   * 구조화 좌표 계약이 별도이므로 본문 문단으로 추측해 변환하지 않는다.
+   */
+  getHostSelectionRange(): { start: DocumentPosition; end: DocumentPosition } | null {
+    const selection = this.getNonEmptySelection();
+    if (!selection) return null;
+    return {
+      start: this.toHostDocumentPosition(selection.start),
+      end: this.toHostDocumentPosition(selection.end),
+    };
+  }
+
   /** 개체(그림·도형·수식 등) 선택 정보 — embed 호스트 API용(xyren-edit-v1).
    *  텍스트 선택과 별개인 개체 선택 모드를 호스트가 알 수 있게 한다(예: 채팅이
    *  "지금 선택된 그림"을 컨텍스트로 주입). 다중 선택은 첫 개체를 대표로 준다. */
@@ -4241,6 +4257,28 @@ export class InputHandler {
 
   /** 현재 커서 위치를 반환한다 */
   getCursorPosition(): DocumentPosition { return this.cursor.getPosition(); }
+
+  /** embed 호스트에 전달할 UTF-16 본문 커서 위치. */
+  getHostCursorPosition(): DocumentPosition {
+    return this.toHostDocumentPosition(this.cursor.getPosition());
+  }
+
+  private toHostDocumentPosition(position: DocumentPosition): DocumentPosition {
+    const isStructuredPosition =
+      position.parentParaIndex !== undefined ||
+      position.cellPath !== undefined ||
+      position.cellIndex !== undefined ||
+      position.isTextBox === true;
+    if (isStructuredPosition) return { ...position };
+    return {
+      ...position,
+      charOffset: this.wasm.logicalToUtf16TextOffset(
+        position.sectionIndex,
+        position.paragraphIndex,
+        position.charOffset,
+      ),
+    };
+  }
 
   /** 본문 탐색 전에 각주 전용 편집 컨텍스트를 종료한다. */
   exitFootnoteModeForBodyNavigation(): void {

@@ -1337,6 +1337,15 @@ export class WasmBridge {
     } catch { return []; }
   }
 
+  /** 내부 논리 좌표를 호스트 계약의 UTF-16 텍스트 좌표로 변환한다. */
+  logicalToUtf16TextOffset(sec: number, para: number, logicalOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const textOffset = this.doc.logicalToTextOffset(sec, para, logicalOffset);
+    // WASM 텍스트 좌표는 Unicode scalar index이고 JS 문자열 길이는 UTF-16 code
+    // unit이다. 기존 primitive로 접두사를 읽어 서버/브라우저 계약으로 변환한다.
+    return this.doc.getTextRange(sec, para, 0, textOffset).length;
+  }
+
   /** 문서 트리 DFS 기반 다음/이전 편집 가능 위치 반환 */
   navigateNextEditable(
     sec: number, para: number, charOffset: number, delta: number,
