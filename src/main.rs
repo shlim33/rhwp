@@ -275,6 +275,7 @@ fn main() {
         Some("export-text") => exit_with(export_text(&args[2..])),
         Some("export-markdown") => exit_with(export_markdown(&args[2..])),
         Some("export-tables") => exit_with(export_tables(&args[2..])),
+        Some("export-blocks") => exit_with(export_blocks(&args[2..])),
         Some("table-to-csv") => exit_with(table_to_csv(&args[2..])),
         Some("csv-to-table") => exit_with(csv_to_table(&args[2..])),
         Some("export-hwpx") => exit_with(export_hwpx(&args[2..])),
@@ -558,6 +559,7 @@ fn mcp_tool_definitions() -> Vec<serde_json::Value> {
                 | "hwp_convert_hwp5"
                 | "hwp_split_document"
                 | "hwp_export_tables"
+                | "hwp_export_blocks"
                 | "hwp_search"
                 | "hwp_extract_data"
                 | "hwp_fields"
@@ -879,6 +881,23 @@ fn mcp_tool_definitions() -> Vec<serde_json::Value> {
             "export-tables",
             serde_json::json!(["export-tables", "{path}", "--json"]),
             &["source", "tableCount", "tables"],
+        ),
+        tool_with_optional_args(
+            "hwp_export_blocks",
+            "문서를 문서 순서 블록(문단·제목·표·그림)으로 추출한다. 표는 hwp_export_tables 와 같은 격자를 제자리에 싣고 제목은 hwp_export_structure 와 같은 판정을 따르며 블록마다 문단 주소와 페이지가 붙는다 — 문서를 청킹·적재하는 파이프라인의 단일 입력.",
+            path_schema(serde_json::json!({
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "outline", "clause"],
+                    "description": "제목 판정 방식. 기본 auto"
+                }
+            })),
+            "export-blocks",
+            serde_json::json!(["export-blocks", "{path}", "--json"]),
+            serde_json::json!([
+                { "when": "mode", "args": ["--mode", "{mode}"] }
+            ]),
+            &["source", "mode", "blockCount", "tableCount", "pageCount", "pagesMapped", "blocks"],
         ),
         // [#3719 §6] 표 → CSV. hwp_export_tables 는 병합을 span 으로 보존하는 격자
         // JSON 이라 소비자가 직접 격자를 펴야 한다 — 표 계산기에 바로 먹이는 축은 이쪽이다.
@@ -2769,6 +2788,23 @@ fn capabilities_command_entries() -> Vec<serde_json::Value> {
             &["-o", "--json"],
             &["schemaVersion", "source", "tableCount", "tables"],
         ),
+        cmd_json(
+            "export-blocks",
+            "export",
+            "문서 순서 블록(문단·제목·표·그림)을 문단 주소·페이지와 함께 JSON으로 추출",
+            false,
+            &["-o", "--json", "--mode", "--no-pages"],
+            &[
+                "schemaVersion",
+                "source",
+                "mode",
+                "blockCount",
+                "tableCount",
+                "pageCount",
+                "pagesMapped",
+                "blocks",
+            ],
+        ),
         // [#3719 §6-7] 데이터 보고서 자동화의 입출구 — 표 ↔ CSV.
         cmd_json(
             "table-to-csv",
@@ -3728,6 +3764,17 @@ fn print_help() {
     println!();
     println!("      --json                  계약 봉투 JSON을 stdout에 출력");
     println!("      -o, --output <파일>     JSON을 파일로 저장");
+    println!();
+    println!("  export-blocks <파일.hwp|파일.hwpx> [--json] [-o <출력.json>] [--mode auto|outline|clause] [--no-pages]");
+    println!("      문서 순서 블록(문단·제목·표·그림)을 문단 주소·페이지와 함께 JSON으로 추출");
+    println!(
+        "      (표는 export-tables 와 같은 격자를 제자리에, 제목은 export-structure 와 같은 판정)"
+    );
+    println!();
+    println!("      --json                  계약 봉투 JSON을 stdout에 출력");
+    println!("      -o, --output <파일>     JSON을 파일로 저장");
+    println!("      --mode <방식>           제목 판정 방식 (기본 auto)");
+    println!("      --no-pages              렌더 페이지 역매핑 생략 (레이아웃을 돌리지 않음)");
     println!();
     println!("  table-to-csv <파일.hwp|파일.hwpx> [--table <번호>] [-o <경로>] [--bom] [--json]");
     println!("      본문 최상위 표를 RFC 4180 CSV로 내보내기 (병합 격자를 채워 열이 밀리지 않음)");
@@ -5832,6 +5879,130 @@ fn export_text(args: &[String]) -> i32 {
     } else {
         EXIT_RUNTIME
     }
+}
+
+/// `export-blocks` — 문서 순서 블록(문단·제목·표·그림) JSON 추출.
+///
+/// `export-markdown` 은 페이지 렌더 트리를 직렬화해 분할 표가 페이지마다 중복되고
+/// 컨테이너 표의 주소를 오해석하며 병합을 버린다. `export-tables` 는 정확하지만 표가
+/// 본문 어디에 있는지 모른다. 본 명령은 문서 모델을 순서대로 걸으며 표를 `export-tables`
+/// 와 같은 격자로 **제자리에** 싣고, 제목은 `export-structure` 와 같은 판정을, 페이지는
+/// 렌더 트리 역매핑을 붙인다 — 문서 처리 파이프라인(RAG 적재)의 단일 입력이다.
+fn export_blocks(args: &[String]) -> i32 {
+    use rhwp::document_core::queries::blocks::{export_blocks as extract_blocks, BlocksOptions};
+    use rhwp::document_core::queries::structure::StructureMode;
+
+    let mut file_path: Option<&str> = None;
+    let mut out_path: Option<String> = None;
+    let mut json_mode = false;
+    let mut mode = StructureMode::Auto;
+    let mut pages = true;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json_mode = true,
+            "--no-pages" => pages = false,
+            "--mode" => {
+                i += 1;
+                match args.get(i).and_then(|m| StructureMode::parse(m)) {
+                    Some(m) => mode = m,
+                    None => {
+                        eprintln!("오류: --mode 는 auto|outline|clause 중 하나여야 합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
+            "-o" | "--out" | "--output" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => out_path = Some(p.clone()),
+                    None => {
+                        eprintln!("오류: -o 뒤에 출력 파일 경로가 필요합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("알 수 없는 옵션: {other}");
+                return EXIT_USAGE;
+            }
+            other => {
+                if file_path.replace(other).is_some() {
+                    eprintln!("오류: 입력 파일은 하나만 지정할 수 있습니다.");
+                    return EXIT_USAGE;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let Some(file_path) = file_path else {
+        eprintln!(
+            "사용법: rhwp export-blocks <파일.hwp|파일.hwpx> [--json] [-o <출력.json>] [--mode auto|outline|clause] [--no-pages]"
+        );
+        return EXIT_USAGE;
+    };
+
+    let data = match fs::read(file_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
+            return EXIT_RUNTIME;
+        }
+    };
+    let core = match load_document_core(&data) {
+        Ok(c) => c,
+        Err(e) => return e.report(),
+    };
+
+    let doc = extract_blocks(&core, &BlocksOptions { mode, pages });
+    let envelope = blocks_json_value(file_path, &doc);
+
+    if let Some(p) = out_path {
+        let json = match serde_json::to_string_pretty(&envelope) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("오류: JSON 직렬화 실패 - {}", e);
+                return EXIT_RUNTIME;
+            }
+        };
+        return match fs::write(&p, &json) {
+            Ok(_) => {
+                println!(
+                    "블록 추출 완료: {}개 (표 {}개) → {}",
+                    doc.block_count, doc.table_count, p
+                );
+                EXIT_OK
+            }
+            Err(e) => {
+                eprintln!("오류: 출력 쓰기 실패 - {}: {}", p, e);
+                EXIT_RUNTIME
+            }
+        };
+    }
+
+    if json_mode {
+        println!("{}", provenance::marked(envelope, "export-blocks"));
+        return EXIT_OK;
+    }
+
+    // 기본 출력은 사람용 요약 — 기계 소비는 --json 이 담당한다.
+    use rhwp::document_core::queries::blocks::BlockKind;
+    let count = |k: BlockKind| doc.blocks.iter().filter(|b| b.kind == k).count();
+    println!(
+        "문서 로드: {} (블록 {}개: 문단 {}, 제목 {}, 표 {}, 그림 {}; 제목 판정 {})",
+        file_path,
+        doc.block_count,
+        count(BlockKind::Paragraph),
+        count(BlockKind::Heading),
+        count(BlockKind::Table),
+        count(BlockKind::Image),
+        doc.mode
+    );
+    if let (Some(total), Some(mapped)) = (doc.page_count, doc.pages_mapped) {
+        println!("  페이지 {}쪽 (역매핑 {}쪽)", total, mapped);
+    }
+    EXIT_OK
 }
 
 /// `export-tables` — 표를 격자 JSON 으로 추출 (병합·중첩 보존).
@@ -8558,6 +8729,23 @@ fn structure_json_value(
 }
 
 /// [#3346] `export-tables --json` 과 `batch export-tables` 가 공유하는 봉투.
+/// `export-blocks --json` 봉투 — `BlocksDoc` 직렬화에 `schemaVersion`·`source` 를 얹는다.
+fn blocks_json_value(
+    file_path: &str,
+    doc: &rhwp::document_core::queries::blocks::BlocksDoc,
+) -> serde_json::Value {
+    let mut envelope = serde_json::json!({
+        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+        "source": file_path,
+    });
+    if let (Some(env), Ok(serde_json::Value::Object(body))) =
+        (envelope.as_object_mut(), serde_json::to_value(doc))
+    {
+        env.extend(body);
+    }
+    provenance::marked(envelope, "export-blocks")
+}
+
 fn tables_json_value(
     file_path: &str,
     tables: &[rhwp::document_core::queries::table_extract::TableGrid],

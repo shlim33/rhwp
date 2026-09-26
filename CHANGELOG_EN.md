@@ -6,6 +6,20 @@ This document records the major changes of the rhwp project.
 
 ## [Unreleased]
 
+### Document-order block export
+
+- Added `export-blocks <file> [--json] [-o] [--mode] [--no-pages]` and the MCP tool
+  `hwp_export_blocks`. It walks the document model in document order and emits
+  paragraph, heading, table and image blocks: tables carry the same grid as
+  `export-tables` (merged cells and nested tables preserved, identical `index`) in
+  place, headings follow the same classification as `export-structure`, and every
+  block carries its root paragraph address, container path and rendered page
+  (`pageCount`/`pagesMapped` expose how complete the page mapping is). This fixes,
+  at the model layer, what `export-markdown` gets wrong for document pipelines:
+  split tables duplicated on every page, container table addresses misresolved,
+  merges dropped. `blocks[].text` and friends are registered in the provenance map
+  and `tests/export_blocks_json_contract.rs` pins the contract.
+
 ## [0.8.4] — 2026-08-12
 
 ### Distribution surface rollback

@@ -96,7 +96,7 @@ fn paragraphs_text(paragraphs: &[Paragraph]) -> String {
 ///
 /// 깊이 상한은 `dump` 명령(`dump_table_deep`)과 같은 이유로 둔다 — 악의적/손상 문서의
 /// 병적 중첩에서 스택이 터지지 않게 한다.
-const MAX_NEST_DEPTH: usize = 8;
+pub(crate) const MAX_NEST_DEPTH: usize = 8;
 
 fn nested_tables(
     cell: &Cell,
@@ -131,7 +131,9 @@ fn nested_tables(
     out
 }
 
-fn build_grid(
+/// 표 하나를 격자로 만든다. `queries::blocks` 가 같은 함수로 제자리 표를 만들어
+/// `export-blocks` 의 표 격자가 `export-tables` 와 바이트 단위로 같도록 한다.
+pub(crate) fn build_grid(
     table: &Table,
     index: usize,
     section: usize,

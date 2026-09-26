@@ -202,6 +202,23 @@ pub const MAP: &[CommandProvenance] = &[
         note: "격자 주소(row/col/rowSpan/colSpan)와 개수는 엔진값이다.",
     },
     CommandProvenance {
+        command: "export-blocks",
+        untrusted: &[
+            f("blocks[].text", "문단·제목 텍스트(수식 스크립트 포함)"),
+            f(
+                "blocks[].heading.marker",
+                "제목 문단 선두에서 검출한 번호 마커 원문(제1조·① 등)",
+            ),
+            f("blocks[].table.caption", "표 캡션 텍스트"),
+            f("blocks[].table.cells[].text", "셀 문단 텍스트 결합값"),
+            f(
+                "blocks[].table.cells[].nested[]",
+                "중첩 표 — caption/cells 가 같은 규칙으로 재귀한다",
+            ),
+        ],
+        note: "블록 순번·주소(section/paragraph/control/containerPath)·페이지·headType/paraLevel·격자 좌표·개수는 엔진값이다.",
+    },
+    CommandProvenance {
         command: "table-to-csv",
         untrusted: &[f(
             "tables[].csv",

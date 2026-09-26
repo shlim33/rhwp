@@ -642,6 +642,16 @@ fn recipes() -> Vec<Recipe> {
             ndjson: false,
         },
         Recipe {
+            command: "export-blocks",
+            doc: Some(main.clone()),
+            // 페이지 역매핑을 켠 채로 돈다 — 선언한 recordFields(pageCount/pagesMapped)가
+            // 실제 봉투에 나타나는지 가드 ③이 본다.
+            args: vec![s("export-blocks"), p(&main), s("--json")],
+            stdin: None,
+            exit: 0,
+            ndjson: false,
+        },
+        Recipe {
             command: "table-to-csv",
             doc: Some(table.clone()),
             args: vec![

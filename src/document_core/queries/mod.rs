@@ -26,6 +26,8 @@ pub mod navigation;
 pub mod pii_scan;
 pub(crate) mod search_query;
 pub mod structure;
+/// 문서 순서 블록(문단·제목·표·그림) — `table_extract` 격자와 `structure` 판정을 제자리에 잇는 질의.
+pub mod blocks;
 // [#3719 §6-7] 표 ↔ CSV 변환 — `table_extract` 격자를 재사용하는 순수 변환 코어.
 pub mod table_csv;
 pub mod table_extract;
