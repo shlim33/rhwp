@@ -334,6 +334,39 @@ find inbox/ -name '*.hwp' | rhwp batch convert --out-dir converted --verify --ve
 rhwp export-tables 별표.hwp --json | jq '.tables[].cells[] | select(.isHeader)'
 ```
 
+### `export-blocks <파일> [--json] [-o out.json] [--mode auto|outline|clause] [--no-pages]`
+문서 모델을 **문서 순서 그대로** 블록(문단·제목·표·그림)으로 낸다 — 문서 처리 파이프라인
+(RAG 적재·청킹)의 단일 입력. 파서/렌더 무변경 읽기 질의.
+- 왜 `export-markdown` 이 아닌가: 마크다운은 **페이지 렌더 트리**를 직렬화해 (1) 페이지에
+  걸친 표가 페이지마다 통째로 중복되고 (2) 머리말·글상자·중첩 표는 (구역, 문단, 컨트롤)
+  주소가 컨테이너 내부 값이라 엉뚱한 표를 내거나 평문으로 흘리며 (3) 병합을 버리고 첫 행을
+  무조건 머리 행으로 만든다. `export-tables` 는 정확하지만 표가 본문 어디에 있는지 모른다.
+- 표는 `export-tables` 와 **같은 격자**(`index` 까지 동일)를 제자리에 싣는다. 제목은
+  `export-structure` 와 같은 판정(`--mode`, 기본 `auto`)이고, 문단 모양의 머리 종류는
+  엔진값 `headType`(outline|number|bullet)·`paraLevel`(1~7)로 따로 싣는다.
+- 페이지는 렌더 트리의 (구역, 문단[, 컨트롤]) 주소를 역매핑해 붙인다. `--no-pages` 면
+  레이아웃을 돌리지 않아 빠르고 `pageCount`/`pagesMapped`/`page` 가 빠진다.
+  `pagesMapped < pageCount` 면 일부 페이지의 블록에 `page` 가 없다(조용한 소실 대신 개수로).
+- `--json` 봉투: `{"schemaVersion":"1.0","source","mode","blockCount","tableCount","pageCount"?,"pagesMapped"?,"blocks":[…]}`
+- 블록: `{index,kind,section,paragraph,control?,containerPath?,page?,text?,heading?,headType?,paraLevel?,table?,binDataId?}`
+  - `kind`: `paragraph` | `heading` | `table` | `image`. 빈 문단은 블록이 아니다.
+  - `section`/`paragraph` 는 **루트(본문) 문단 주소** — 글상자·머리말/꼬리말·각주/미주 안
+    블록도 루트 주소를 갖고 `containerPath`(`export-tables` 와 같은 어휘)로 안쪽을 가리킨다.
+  - `heading`: `{level,kind,marker?}` — `export-structure` 노드와 1:1. 컨테이너 안 문단은
+    제목 판정을 하지 않는다(`build_structure` 가 본문만 걷는다).
+  - `table`: `export-tables` 의 표 객체 그대로(병합 `rowSpan/colSpan`·`isHeader`·`nested`).
+  - `text` 는 수식 스크립트를 합친 값(#3413)이며 앞뒤 공백을 제거한다.
+- 기본 출력은 사람용 요약(종류별 개수·페이지), `-o` 는 pretty JSON 파일 저장.
+- 한계: 자동번호·글머리표 **문자열**은 렌더 단계 값이라 `text` 에 없다(`headType`/`paraLevel`
+  로 구조만 안다). 셀 안 자동번호도 `export-tables` 와 같이 빈 자리다.
+
+```bash
+# 제목 경로를 따라가며 표를 제자리에서 소비 — 표 블록의 격자는 export-tables 와 같다
+rhwp export-blocks 공고문.hwpx --json | jq -c '.blocks[] | {index, kind, page, section, paragraph, text: (.text // .table.caption)}'
+# 레이아웃 없이 구조만(빠름)
+rhwp export-blocks 공고문.hwpx --json --no-pages | jq '[.blocks[] | select(.kind=="table")] | length'
+```
+
 ### `table-to-csv <파일.hwp|파일.hwpx> [--table <번호>] [-o <경로>] [--bom] [--json]` (#3719 §6)
 본문 최상위 표를 RFC 4180 CSV 로 내보낸다. `export-tables` 의 격자 JSON 은 병합을 span 으로
 보존하지만 표 계산기(엑셀 등)는 직사각 격자만 먹는다. 그래서 격자를 채워서(병합으로 덮인

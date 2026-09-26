@@ -72,6 +72,7 @@ IR·provenance·plan 네 축을 한 번에 조립하고, 빠진 축은 `missingA
 | 특정 쪽 본문만 | `export-text -p N --json` | `pages[0].page` | 같은 절 |
 | 컨텍스트 상한 걸기 | `export-text --max-chars N --json` | `truncated`·`omittedCount` | 같은 절 |
 | 표 격자(병합 보존) | `export-tables --json` (`hwp_export_tables`) | `tables[].cells[].rowSpan/colSpan` | [CLI 매뉴얼](cli_commands.md) §export-tables |
+| 문서 순서대로 문단·제목·표·그림(청킹·적재 입력) | `export-blocks --json` (`hwp_export_blocks`) | `blocks[].kind`·`blocks[].page`·`blocks[].table` | [CLI 매뉴얼](cli_commands.md) §export-blocks |
 | 표를 스프레드시트로 | `table-to-csv --json` (`hwp_table_to_csv`) | `tables[].csv`·`output` | [CLI 매뉴얼](cli_commands.md) §table-to-csv |
 | 표를 파이프로 흘리기 | `table-to-csv --table N` (`--json`·`-o` 없이) | stdout = CSV 본문 | 같은 절 |
 | 문자열 찾기 + 쪽 주소 | `search --json` (`hwp_search`) | `matchCount`·`matches[].page` | [CLI 매뉴얼](cli_commands.md) §search |
@@ -982,7 +983,7 @@ exit 3 ↔ `isError:false` + `identical:false`. 상세는
 `nextCall.name:"hwp_search"`). CLI 도 같다: `rhwp serach` →
 `힌트: 가장 가까운 명령은 'search' 입니다`.
 
-## 5. 명령 전수 지도 — 71개를 성격으로 나눈다
+## 5. 명령 전수 지도 — 72개를 성격으로 나눈다
 
 `capabilities` 의 `category` 그대로다. **`--json` 이 있는 40개만이 기계 계약**이고,
 나머지는 사람이 읽는 진단 출력이다.
@@ -990,18 +991,18 @@ exit 3 ↔ `isError:false` + `identical:false`. 상세는
 | 분류 | 개수 | 명령 |
 |---|---|---|
 | `query` | 13 | `info`·`digest`·`replay`·`lineage`·`audit`·`capabilities`·`export-provenance-map`·`export-agent-manifest`·`search`·`extract-data`·`fields`·`explain`·`inspect` |
-| `export` | 20 | `export-text`·`export-structure`·`export-ir-schema`·`export-plan-schema`·`export-svg`·`export-png`·`export-pdf`·`export-markdown`·`export-hwpx`·`export-hml`·`export-doclang`·`export-capabilities-schema`·`export-ontology`·`export-tables`·`table-to-csv`·`extract-pages`·`export-render-tree`·`convert`·`build-from-ingest`·`thumbnail` |
+| `export` | 21 | `export-text`·`export-structure`·`export-ir-schema`·`export-plan-schema`·`export-svg`·`export-png`·`export-pdf`·`export-markdown`·`export-hwpx`·`export-hml`·`export-doclang`·`export-capabilities-schema`·`export-ontology`·`export-tables`·`export-blocks`·`table-to-csv`·`extract-pages`·`export-render-tree`·`convert`·`build-from-ingest`·`thumbnail` |
 | `edit` | 3 | `run`·`csv-to-table`·`edit`(6개 하위 명령) |
 | `batch` | 2 | `batch`(9축)·`scan` |
 | `serve` | 1 | `mcp-serve` |
 | `diagnostic` | 27 | `dump`·`dump-pages`·`dump-extents`·`dump-note-shape`·`dump-endnote-lines`·`dump-records`·`diag`·`ir-diff`·`verify`·`render-diff`·`hwpx-roundtrip`·`hwp5-roundtrip`·`measure-width`·`core-pages`·`bench`·`hwp5-inventory`·`hwp5-inventory-diff`·`hwp5-contract-analyze`·`hwp5-contract-probe`·`hwp5-ctrl-data-trace`·`hwp5-table-probe`·`hwp5-mel-personnel-probe`·`hwp5-borderfill-diagonal-probe`·`hwp5-first-para-control-probe`·`hwp5-anchor-trace`·`hwp5-cell-header-probe`·`hwp5-char-shape-audit` |
 | `internal` | 5 | `test-shape`·`test-caption`·`test-field`·`gen-table`·`gen-pua` |
 
-**`--json` 계약 40개** — `info`·`export-text`·`export-structure`·`digest`·
+**`--json` 계약 41개** — `info`·`export-text`·`export-structure`·`digest`·
 `export-ir-schema`·`run`·`replay`·`lineage`·`audit`·`export-plan-schema`·
 `capabilities`·`export-provenance-map`·`export-agent-manifest`·`export-svg`·
 `export-pdf`·`export-markdown`·`export-hwpx`·`export-hml`·`export-doclang`·
-`export-capabilities-schema`·`export-ontology`·`export-tables`·`table-to-csv`·
+`export-capabilities-schema`·`export-ontology`·`export-tables`·`export-blocks`·`table-to-csv`·
 `csv-to-table`·`extract-pages`·`search`·`extract-data`·`fields`·`explain`·`inspect`·
 `convert`·`build-from-ingest`·`thumbnail`·`edit`·`batch`·`scan`·`dump-pages`·
 `ir-diff`·`verify`·`render-diff`.
@@ -1017,9 +1018,9 @@ exit 3 ↔ `isError:false` + `identical:false`. 상세는
 **`inspect` 하위 3개** — `hidden-text`·`injection`·`unicode`. 전부 읽기 전용이고
 문서를 고치지 않는다.
 
-## 6. MCP 도구 전수 지도 — 82개
+## 6. MCP 도구 전수 지도 — 83개
 
-### 6-1. 무상태 66개 (`capabilities --mcp` 선언 = `mcp-serve` 제공)
+### 6-1. 무상태 67개 (`capabilities --mcp` 선언 = `mcp-serve` 제공)
 
 | 도구 | CLI 대응 | 필수 인자 |
 |---|---|---|
@@ -1040,6 +1041,7 @@ exit 3 ↔ `isError:false` + `identical:false`. 상세는
 | `hwp_thumbnail` | `thumbnail --data-uri --json` | `path` |
 | `hwp_split_document` | `extract-pages --json` | `path`,`from`,`to`,`output` |
 | `hwp_export_tables` | `export-tables --json` | `path` |
+| `hwp_export_blocks` | `export-blocks --json` | `path` |
 | `hwp_table_to_csv` | `table-to-csv --json` | `path` |
 | `hwp_csv_to_table` | `csv-to-table --json` | `path`,`csv`,`table` |
 | `hwp_search` | `search --json` | `path`,`query` |
@@ -1188,6 +1190,7 @@ tracked `tests/**/*_contract.rs` **85개**가 있다. 표면을 고칠 때 **어
 | `search_dash_query_contract.rs` | `-` 로 시작하는 검색어와 `--` 구분자 |
 | `fields_json_contract.rs` | `fields` 읽기 전용 누름틀 조사 봉투 (#3281) |
 | `table_extract_json_contract.rs` | `export-tables` 병합 보존 격자 봉투 (#3278) |
+| `export_blocks_json_contract.rs` | `export-blocks` 문서 순서 블록 봉투 — 표 격자 = `export-tables`, 제목 = `export-structure`, 페이지 역매핑, 컨테이너 경로 |
 | `table_csv_contract.rs` | `table-to-csv`/`csv-to-table` RFC 4180 왕복 |
 | `extract_data_contract.rs` | `extract-data` 정규화·`normalized:null` 규약 |
 | `info_title_contract.rs` | `info` 의 제목 추출 |

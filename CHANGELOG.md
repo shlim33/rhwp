@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 문서 순서 블록 추출
+
+- `export-blocks <파일> [--json] [-o] [--mode] [--no-pages]` 와 MCP 도구
+  `hwp_export_blocks` 를 추가했다. 문서 모델을 문서 순서 그대로 문단·제목·표·그림
+  블록으로 내며, 표는 `export-tables` 와 같은 격자(병합·중첩 보존, `index` 동일)를
+  제자리에 싣고 제목은 `export-structure` 와 같은 판정을 따른다. 블록마다 루트 문단
+  주소·컨테이너 경로·렌더 페이지(`pageCount`/`pagesMapped` 로 역매핑 완전성 공개)가
+  붙는다. `export-markdown` 의 페이지 렌더 트리 직렬화가 분할 표를 페이지마다 중복하고
+  컨테이너 표 주소를 오해석하며 병합을 버리는 문제를 문서 처리 파이프라인에서
+  우회하지 않고 모델 층에서 푼다. 출처 지도(`export-provenance-map`)에 `blocks[].text`
+  등 문서 파생 필드를 등재했고 `tests/export_blocks_json_contract.rs` 가 계약을 고정한다.
+
 ## [0.8.4] — 2026-08-12
 
 ### 배포 채널 복원
